@@ -1,5 +1,6 @@
 import subprocess
 import shutil
+import stat
 import re
 import os
 import logging
@@ -24,13 +25,23 @@ class TokenScrubFilter(logging.Filter):
             for pattern in self.PATTERNS:
                 record.msg = pattern.sub('[REDACTED]', record.msg)
         if record.args:
-            sanitized_args = []
-            for arg in (record.args if isinstance(record.args, (list, tuple)) else [record.args]):
-                if isinstance(arg, str):
-                    for pattern in self.PATTERNS:
-                        arg = pattern.sub('[REDACTED]', arg)
-                sanitized_args.append(arg)
-            record.args = tuple(sanitized_args)
+            if isinstance(record.args, dict):
+                # Celery 使用 %(key)s 风格的 dict 参数，必须保持为 dict
+                sanitized_args = {}
+                for k, v in record.args.items():
+                    if isinstance(v, str):
+                        for pattern in self.PATTERNS:
+                            v = pattern.sub('[REDACTED]', v)
+                    sanitized_args[k] = v
+                record.args = sanitized_args
+            else:
+                sanitized_args = []
+                for arg in (record.args if isinstance(record.args, (list, tuple)) else [record.args]):
+                    if isinstance(arg, str):
+                        for pattern in self.PATTERNS:
+                            arg = pattern.sub('[REDACTED]', arg)
+                    sanitized_args.append(arg)
+                record.args = tuple(sanitized_args)
         return True
 
 
@@ -47,12 +58,21 @@ def _setup_token_scrub_filter() -> None:
 _setup_token_scrub_filter()
 
 
+def _remove_readonly(func, path, excinfo):
+    """Windows 只读文件删除处理器：解除只读属性后重试"""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass  # 忽略无法删除的文件，继续清理其余文件
+
+
 def clone_repository(
     repo_url: str,
     local_path: str,
     pat_token: Optional[str] = None,
-    branch: str = "main",
-) -> bool:
+    branch: Optional[str] = None,
+) -> tuple:
     """
     安全克隆 Git 仓库。
 
@@ -75,18 +95,16 @@ def clone_repository(
 
         target = Path(local_path)
         if target.exists():
-            shutil.rmtree(target)
+            shutil.rmtree(target, onerror=_remove_readonly)
         target.parent.mkdir(parents=True, exist_ok=True)
 
+        cmd = ["git", "clone", "--depth", "1", "--single-branch"]
+        if branch:
+            cmd += ["--branch", branch]
+        cmd += [clone_url, str(target)]
+
         result = subprocess.run(
-            [
-                "git", "clone",
-                "--depth", "1",
-                "--branch", branch,
-                "--single-branch",
-                clone_url,
-                str(target),
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=600,
@@ -97,18 +115,18 @@ def clone_repository(
             error_msg = result.stderr
             for pattern in TokenScrubFilter.PATTERNS:
                 error_msg = pattern.sub('[REDACTED]', error_msg)
-            logger.error(f"Git clone 失败: {error_msg}")
-            return False
+            logger.error(f"Git clone 失败 (returncode={result.returncode}): {error_msg.strip()}")
+            return False, error_msg.strip()
 
         logger.info(f"仓库克隆成功: {local_path}")
-        return True
+        return True, ""
 
     except subprocess.TimeoutExpired:
         logger.error("Git clone 超时 (>600s)")
-        return False
+        return False, "Git clone 超时 (>600s)"
     except Exception as e:
         logger.exception(f"Git clone 异常: {type(e).__name__}")
-        return False
+        return False, str(e)
     finally:
         if pat_token:
             clone_url = repo_url

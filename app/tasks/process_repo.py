@@ -1,9 +1,12 @@
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from app.celery_app import celery_app
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
@@ -13,7 +16,7 @@ def process_repository_task(
     repo_id: str,
     repo_url: str,
     pat_token: str = None,
-    branch: str = "main",
+    branch: str = None,  # None = 使用远端默认分支
     llm_provider: str = None,
     llm_model: str = None,
 ):
@@ -37,36 +40,53 @@ async def _run_task(
     repo_id: str,
     repo_url: str,
     pat_token: str = None,
-    branch: str = "main",
+    branch: str = None,  # None = 使用远端默认分支
     llm_provider: str = None,
     llm_model: str = None,
 ):
     """异步任务执行主体"""
     from app.database import async_session_factory
-    from app.models.task import Task, TaskStatus
+    from app.models.task import Task, TaskStatus, TaskType
     from app.models.repository import Repository, RepoStatus
     from app.tasks.git_operations import clone_repository
     # Celery worker 是独立进程，不经过 FastAPI lifespan，需自行初始化 Redis
     from app.core.redis_client import init_redis, close_redis
 
-    await init_redis()
+    logger.info(f"[Task] 开始执行: task_id={task_id} repo_id={repo_id} url={repo_url} branch={branch}")
+
+    # init_redis 单独保护：失败时尝试将 DB 状态标记为 FAILED
+    try:
+        await init_redis()
+        logger.info("[Task] Redis 初始化成功")
+    except Exception as e:
+        logger.error(f"[Task] Redis 初始化失败，任务无法执行: {e}", exc_info=True)
+        try:
+            async with async_session_factory() as db:
+                await _fail_task(db, task_id, f"Redis 初始化失败: {e}", stage="cloning")
+        except Exception as db_err:
+            logger.error(f"[Task] 标记任务失败时 DB 也出错: {db_err}")
+        raise
+
     try:
         async with async_session_factory() as db:
             try:
+                _stage = "cloning"  # 追踪当前阶段，用于异常时记录 failed_at_stage
+
                 # ===== 阶段 1: 克隆仓库 =====
                 await _update_task(db, task_id, TaskStatus.CLONING, 5, "正在克隆仓库...")
                 await _publish(task_id, "cloning", 5, "正在克隆仓库...")
 
                 local_path = f"{settings.REPOS_BASE_DIR}/{repo_id}"
                 # clone_repository 内部使用 subprocess，通过 to_thread 避免阻塞事件循环
-                success = await asyncio.to_thread(
+                success, clone_error = await asyncio.to_thread(
                     clone_repository, repo_url, local_path, pat_token, branch
                 )
                 # PAT Token 在 clone_repository 内已销毁
 
                 if not success:
-                    await _fail_task(db, task_id, "仓库克隆失败")
-                    await _publish(task_id, "failed", 0, "仓库克隆失败")
+                    err_detail = f"仓库克隆失败: {clone_error}" if clone_error else "仓库克隆失败"
+                    await _fail_task(db, task_id, err_detail, stage="cloning")
+                    await _publish(task_id, "failed", 0, err_detail)
                     return
 
                 # 更新 Repository 记录
@@ -76,33 +96,71 @@ async def _run_task(
                     repo.status = RepoStatus.READY
                 await db.flush()
 
+                # 获取当前 HEAD commit hash（用于增量同步）
+                import subprocess
+                head_commit_hash = ""
+                try:
+                    result = await asyncio.to_thread(
+                        subprocess.run,
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=local_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if result.returncode == 0:
+                        head_commit_hash = result.stdout.strip()
+                except Exception as e:
+                    logger.warning(f"无法获取 HEAD commit hash: {e}")
+
                 # ===== 阶段 2: AST 解析 =====
+                _stage = "parsing"
                 await _update_task(db, task_id, TaskStatus.PARSING, 20, "正在解析代码结构...")
                 await _publish(task_id, "parsing", 20, "正在解析代码结构...")
 
+                # FULL_PROCESS 强制全量重建，INCREMENTAL_SYNC 只处理变更文件
+                task_record = await db.get(Task, task_id)
+                force_full = (task_record is not None and task_record.type == TaskType.FULL_PROCESS)
+
                 try:
                     from app.services.parser import parse_repository
-                    chunks = await parse_repository(db, repo_id, local_path)
+                    chunks, file_hashes = await parse_repository(
+                        db, repo_id, local_path,
+                        commit_hash=head_commit_hash,
+                        force_full=force_full,
+                    )
                 except NotImplementedError:
                     # 模块二尚未实现，跳过解析阶段
-                    chunks = []
+                    chunks, file_hashes = [], {}
+
+                # 严格模式：FULL_PROCESS 必须解析出 chunks，否则视为失败
+                if force_full and not chunks:
+                    err_detail = "解析失败：未能从仓库中提取任何代码块（chunks=0），请确认仓库包含受支持的语言文件"
+                    await _fail_task(db, task_id, err_detail, stage="parsing")
+                    await _publish(task_id, "failed", 0, err_detail)
+                    return
 
                 # ===== 阶段 3: 向量化 =====
+                _stage = "embedding"
                 await _update_task(db, task_id, TaskStatus.EMBEDDING, 50, "正在生成向量嵌入...")
                 await _publish(task_id, "embedding", 50, "正在生成向量嵌入...")
 
                 if chunks:
-                    try:
-                        from app.services.embedder import embed_chunks
+                    from app.services.embedder import embed_chunks
 
-                        async def _embed_progress(pct: float, msg: str):
-                            await _publish(task_id, "embedding", 50 + pct * 0.2, msg)
+                    async def _embed_progress(pct: float, msg: str):
+                        await _publish(task_id, "embedding", 50 + pct * 0.2, msg)
 
-                        await embed_chunks(db, repo_id, chunks, progress_callback=_embed_progress)
-                    except NotImplementedError:
-                        pass
+                    # 严格模式：向量化失败直接抛出，由外层 except 捕获并标记 FAILED
+                    await embed_chunks(
+                        db, repo_id, chunks,
+                        file_hashes=file_hashes,
+                        commit_hash=head_commit_hash,
+                        progress_callback=_embed_progress,
+                    )
 
                 # ===== 阶段 4: Wiki 生成 =====
+                _stage = "generating"
                 await _update_task(db, task_id, TaskStatus.GENERATING, 75, "正在生成 Wiki 文档...")
                 await _publish(task_id, "generating", 75, "正在生成 Wiki 文档...")
 
@@ -138,7 +196,7 @@ async def _run_task(
                 error_msg = re.sub(r'https://oauth2:[^@]+@', 'https://[REDACTED]@', error_msg)
                 error_msg = re.sub(r'ghp_[A-Za-z0-9_]+', '[REDACTED]', error_msg)
                 error_msg = re.sub(r'glpat-[A-Za-z0-9\-_]+', '[REDACTED]', error_msg)
-                await _fail_task(db, task_id, error_msg)
+                await _fail_task(db, task_id, error_msg, stage=_stage)
                 await _publish(task_id, "failed", 0, f"处理失败: {error_msg}")
                 raise
     finally:
@@ -157,13 +215,15 @@ async def _update_task(db, task_id: str, status, progress: float, stage: str):
     await db.flush()
 
 
-async def _fail_task(db, task_id: str, error_msg: str):
-    """标记任务为失败状态"""
+async def _fail_task(db, task_id: str, error_msg: str, stage: str = None):
+    """标记任务为失败状态，记录失败阶段"""
     from app.models.task import Task, TaskStatus
     task = await db.get(Task, task_id)
     if task:
         task.status = TaskStatus.FAILED
         task.error_msg = error_msg
+        if stage:
+            task.failed_at_stage = stage
     await db.commit()
 
 

@@ -39,6 +39,7 @@ class Task(Base):
     current_stage = Column(String(64), nullable=True, comment="当前执行阶段描述")
     error_msg = Column(Text, nullable=True, comment="失败时的错误信息")
     celery_task_id = Column(String(255), nullable=True, comment="Celery 任务 ID，用于取消")
+    failed_at_stage = Column(String(32), nullable=True, comment="失败时所处阶段：cloning/parsing/embedding/generating")
     files_total = Column(Integer, default=0, comment="待处理文件总数")
     files_processed = Column(Integer, default=0, comment="已处理文件数")
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class RepositoryCreateRequest(BaseModel):
     url: str = Field(..., description="Git 仓库完整 URL", examples=["https://github.com/owner/repo"])
     pat_token: Optional[str] = Field(None, description="私有仓库 PAT Token，用后即毁")
-    branch: Optional[str] = Field("main", description="目标分支")
+    branch: Optional[str] = Field(None, description="目标分支，不填则使用远端默认分支")
     llm_provider: Optional[str] = Field(None, description="LLM 供应商标识")
     llm_model: Optional[str] = Field(None, description="模型名称")
 
@@ -44,6 +44,7 @@ class TaskStatusResponse(BaseModel):
     status: str
     progress_pct: float
     current_stage: Optional[str] = None
+    failed_at_stage: Optional[str] = None
     files_total: int
     files_processed: int
     error_msg: Optional[str] = None

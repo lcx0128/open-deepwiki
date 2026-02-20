@@ -73,7 +73,7 @@ async def submit_repository(
             url=request.url,
             name=repo_info["name"],
             platform=repo_info["platform"],
-            default_branch=request.branch or "main",
+            default_branch=request.branch or repo_info.get("default_branch", "main"),
         )
         db.add(repo)
         await db.flush()
@@ -91,7 +91,7 @@ async def submit_repository(
         repo_id=repo.id,
         repo_url=request.url,
         pat_token=request.pat_token,
-        branch=request.branch or "main",
+        branch=request.branch,  # None 表示使用远端默认分支
         llm_provider=request.llm_provider,
         llm_model=request.llm_model,
     )
