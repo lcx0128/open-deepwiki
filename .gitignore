@@ -1,0 +1,112 @@
+# ============================================================
+# open-deepwiki .gitignore
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+pip-wheel-metadata/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.log
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+
+# --- Node.js / Frontend ---
+node_modules/
+dist/
+.nuxt/
+.next/
+.output/
+*.local
+
+# --- Environment Variables (NEVER commit real secrets) ---
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+# Keep the example template
+!.env.example
+
+# --- Project-specific Data Directories ---
+# ChromaDB 向量数据库本地数据
+chromadb_data/
+chroma_data/
+# 克隆的代码仓库缓存
+repos/
+# AdalFlow 兼容目录（如有）
+adalflow/
+wikicache/
+# SQLite 数据库文件（保留 Alembic 迁移脚本）
+*.db
+*.sqlite
+*.sqlite3
+!migrations/
+
+# --- IDE ---
+.idea/
+.vscode/settings.json
+.vscode/launch.json
+*.swp
+*.swo
+*~
+# Keep shared VS Code extensions recommendation
+!.vscode/extensions.json
+
+# --- OS ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# --- Docker ---
+# 不忽略 docker-compose.yml 和 Dockerfile，它们需要被追踪
+# 但忽略本地覆盖文件
+docker-compose.override.yml
+
+# --- Celery ---
+celerybeat-schedule
+celerybeat.pid
+
+# --- Redis ---
+dump.rdb
+
+# --- Logs ---
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Coverage ---
+coverage/
+.nyc_output/
+
+# --- Local-only AI Context Files (implementation plans, not for repo) ---
+# These files exist locally for AI tooling but must never be committed.
+CLAUDE.md
+doc/dev-context/
+.omc/
