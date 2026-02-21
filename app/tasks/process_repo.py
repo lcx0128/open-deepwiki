@@ -23,16 +23,31 @@ def process_repository_task(
     """
     仓库处理主任务 (Celery Task)。
     注意：Celery Task 是同步函数，内部通过 asyncio.run() 调用异步代码。
+    失败时自动重试最多 2 次（30s → 60s 指数退避），重试前重置任务状态为 PENDING。
     """
-    asyncio.run(_run_task(
-        task_id=task_id,
-        repo_id=repo_id,
-        repo_url=repo_url,
-        pat_token=pat_token,
-        branch=branch,
-        llm_provider=llm_provider,
-        llm_model=llm_model,
-    ))
+    try:
+        asyncio.run(_run_task(
+            task_id=task_id,
+            repo_id=repo_id,
+            repo_url=repo_url,
+            pat_token=pat_token,
+            branch=branch,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+        ))
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            countdown = 30 * (2 ** self.request.retries)  # 30s → 60s
+            logger.warning(
+                f"[Task] 任务异常，{countdown}s 后自动重试 "
+                f"(第 {self.request.retries + 1}/{self.max_retries} 次): {exc}"
+            )
+            try:
+                asyncio.run(_reset_task_for_retry(task_id))
+            except Exception as reset_err:
+                logger.warning(f"[Task] 重置任务状态失败，仍将重试: {reset_err}")
+            raise self.retry(exc=exc, countdown=countdown)
+        raise
 
 
 async def _run_task(
@@ -71,6 +86,34 @@ async def _run_task(
         async with async_session_factory() as db:
             try:
                 _stage = "cloning"  # 追踪当前阶段，用于异常时记录 failed_at_stage
+
+                # ===== WIKI_REGENERATE 快速路径：跳过阶段1-3，直接进行Wiki生成 =====
+                task_record_pre = await db.get(Task, task_id)
+                if task_record_pre and task_record_pre.type == TaskType.WIKI_REGENERATE:
+                    _stage = "generating"
+                    await _update_task(db, task_id, TaskStatus.GENERATING, 75, "正在重新生成 Wiki 文档...")
+                    await _publish(task_id, "generating", 75, "正在重新生成 Wiki 文档...")
+                    wiki_id = None
+                    try:
+                        from app.services.wiki_generator import generate_wiki
+
+                        async def _wiki_regen_progress(pct: float, msg: str):
+                            await _publish(task_id, "generating", 75 + pct * 0.2, msg)
+
+                        wiki_id = await generate_wiki(
+                            db, repo_id, llm_provider, llm_model,
+                            progress_callback=_wiki_regen_progress,
+                        )
+                    except NotImplementedError:
+                        pass
+                    await _update_task(db, task_id, TaskStatus.COMPLETED, 100, "Wiki 重新生成完成")
+                    repo_obj = await db.get(Repository, repo_id)
+                    if repo_obj:
+                        repo_obj.last_synced_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    await _publish(task_id, "completed", 100, "Wiki 重新生成完成",
+                                   **({"wiki_id": wiki_id} if wiki_id else {}))
+                    return
 
                 # ===== 阶段 1: 克隆仓库 =====
                 await _update_task(db, task_id, TaskStatus.CLONING, 5, "正在克隆仓库...")
@@ -204,15 +247,28 @@ async def _run_task(
         await close_redis()
 
 
+async def _reset_task_for_retry(task_id: str):
+    """重试前将任务状态重置为 PENDING，确保重试可从干净状态开始"""
+    from app.database import async_session_factory
+    from app.models.task import Task, TaskStatus
+    async with async_session_factory() as db:
+        task = await db.get(Task, task_id)
+        if task:
+            task.status = TaskStatus.PENDING
+            task.error_msg = None
+            task.failed_at_stage = None
+        await db.commit()
+
+
 async def _update_task(db, task_id: str, status, progress: float, stage: str):
-    """更新数据库中的任务状态"""
+    """更新数据库中的任务状态（立即 commit，确保其他连接可见）"""
     from app.models.task import Task
     task = await db.get(Task, task_id)
     if task:
         task.status = status
         task.progress_pct = progress
         task.current_stage = stage
-    await db.flush()
+    await db.commit()
 
 
 async def _fail_task(db, task_id: str, error_msg: str, stage: str = None):

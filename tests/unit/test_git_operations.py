@@ -60,11 +60,11 @@ class TestCloneRepository:
         mock_path.return_value = mock_path_instance
         mock_run.return_value = MagicMock(returncode=0, stderr="")
 
-        result = clone_repository(
+        success, _ = clone_repository(
             "https://github.com/owner/repo",
             "/tmp/test_repo",
         )
-        assert result is True
+        assert success is True
         # 验证没有 Token 注入
         call_args = mock_run.call_args[0][0]
         assert "oauth2" not in " ".join(call_args)
@@ -79,12 +79,12 @@ class TestCloneRepository:
         mock_path.return_value = mock_path_instance
         mock_run.return_value = MagicMock(returncode=0, stderr="")
 
-        result = clone_repository(
+        success, _ = clone_repository(
             "https://github.com/owner/private-repo",
             "/tmp/test_repo",
             pat_token="ghp_test_token_12345",
         )
-        assert result is True
+        assert success is True
         call_args = mock_run.call_args[0][0]
         clone_url_parts = [a for a in call_args if "github.com" in a]
         assert len(clone_url_parts) > 0
@@ -99,8 +99,8 @@ class TestCloneRepository:
         mock_path.return_value = mock_path_instance
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="git", timeout=600)
 
-        result = clone_repository("https://github.com/owner/repo", "/tmp/test")
-        assert result is False
+        success, _ = clone_repository("https://github.com/owner/repo", "/tmp/test")
+        assert success is False
 
     @patch("app.tasks.git_operations.subprocess.run")
     @patch("app.tasks.git_operations.Path")
@@ -111,5 +111,5 @@ class TestCloneRepository:
         mock_path.return_value = mock_path_instance
         mock_run.return_value = MagicMock(returncode=128, stderr="Repository not found")
 
-        result = clone_repository("https://github.com/owner/repo", "/tmp/test")
-        assert result is False
+        success, _ = clone_repository("https://github.com/owner/repo", "/tmp/test")
+        assert success is False

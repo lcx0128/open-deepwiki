@@ -106,6 +106,46 @@ Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SS
 
 ---
 
+### POST /api/repositories/{repo_id}/reprocess — 强制全量重新处理
+
+对已存在的仓库强制触发 FULL_PROCESS 任务（全量重新克隆、解析、向量化、生成 Wiki）。适用于任意阶段失败后需要完整重跑的场景，无需删除仓库重建。
+
+**路径参数**:
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `repo_id` | string | 仓库 UUID |
+
+**请求体**:
+```json
+{
+    "llm_provider": "dashscope",
+    "llm_model": "qwen-plus"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `llm_provider` | string | 否 | LLM 供应商，不填则使用环境变量默认值 |
+| `llm_model` | string | 否 | 模型名称 |
+
+**成功响应 201**:
+```json
+{
+    "task_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "repo_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "status": "pending",
+    "message": "全量重新处理任务已提交"
+}
+```
+
+**错误响应**:
+| 状态码 | 错误码 | 场景 |
+|--------|--------|------|
+| 404 | - | 仓库不存在 |
+| 409 | `REPO_PROCESSING` | 该仓库已有任务在执行中 |
+
+---
+
 ## 任务管理
 
 ### GET /api/tasks/{task_id}
@@ -177,4 +217,117 @@ es.onmessage = (event) => {
         es.close();
     }
 };
+```
+
+---
+
+## Wiki 文档接口
+
+### GET /api/wiki/{repo_id} — 获取 Wiki 内容
+
+获取指定仓库的完整 Wiki 文档（含所有章节和页面）。
+
+**路径参数**:
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `repo_id` | string | 仓库 UUID |
+
+**成功响应 (200)**:
+
+```json
+{
+    "id": "w-xxx",
+    "repo_id": "r-xxx",
+    "title": "Flask 项目知识库",
+    "llm_provider": "openai",
+    "llm_model": "gpt-4o",
+    "created_at": "2026-02-21T10:00:00Z",
+    "sections": [
+        {
+            "id": "s-1",
+            "title": "项目概述",
+            "order_index": 0,
+            "pages": [
+                {
+                    "id": "p-1",
+                    "title": "架构总览",
+                    "importance": "high",
+                    "content_md": "# 架构总览\n\n...",
+                    "relevant_files": ["src/app.py"],
+                    "order_index": 0
+                }
+            ]
+        }
+    ]
+}
+```
+
+**错误响应**:
+
+| HTTP 状态码 | 场景 |
+|------------|------|
+| 404 | 仓库不存在或 Wiki 尚未生成 |
+
+---
+
+### POST /api/wiki/{repo_id}/regenerate — 重新生成 Wiki
+
+触发指定仓库的 Wiki 重新生成任务，返回 task_id 供 SSE 跟踪进度。
+
+**路径参数**:
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `repo_id` | string | 仓库 UUID |
+
+**请求体**:
+
+```json
+{
+    "llm_provider": "dashscope",
+    "llm_model": "qwen-plus",
+    "pages": ["p-1", "p-3"]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `llm_provider` | string | 否 | LLM 供应商，不填则使用环境变量默认值 |
+| `llm_model` | string | 否 | 模型名称 |
+| `pages` | array | 否 | 仅重新生成指定页面 ID 列表（预留，当前全量重生成） |
+
+**成功响应 (201)**:
+
+```json
+{
+    "task_id": "t-xxx",
+    "message": "Wiki 重新生成任务已提交"
+}
+```
+
+**错误响应**:
+
+| HTTP 状态码 | 错误码 | 场景 |
+|------------|-------|------|
+| 404 | - | 仓库不存在 |
+| 409 | `WIKI_REGENERATING` | 已有 Wiki 重生成任务在执行中 |
+
+---
+
+### GET /api/wiki/{repo_id}/pages/{page_id} — 获取单个页面
+
+获取指定 Wiki 页面的完整 Markdown 内容。
+
+**成功响应 (200)**:
+
+```json
+{
+    "id": "p-1",
+    "title": "架构总览",
+    "importance": "high",
+    "content_md": "# 架构总览\n\n完整 Markdown 内容...",
+    "relevant_files": ["src/app.py"],
+    "order_index": 0
+}
 ```
