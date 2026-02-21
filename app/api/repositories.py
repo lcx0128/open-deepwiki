@@ -192,6 +192,7 @@ async def reprocess_repository(
 
     task = Task(repo_id=repo_id, type=TaskType.FULL_PROCESS)
     db.add(task)
+    repo.status = RepoStatus.CLONING
     await db.flush()
 
     from app.tasks.process_repo import process_repository_task

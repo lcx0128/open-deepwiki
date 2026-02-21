@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # MCP
     MCP_AUTH_TOKEN: Optional[str] = None
 
+    # Wiki 生成语言（生成的所有 Wiki 内容强制使用该语言）
+    # 示例：Chinese / English / Japanese / French / German
+    WIKI_LANGUAGE: str = "Chinese"
+
     # 应用
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"

@@ -132,11 +132,10 @@ async def _run_task(
                     await _publish(task_id, "failed", 0, err_detail)
                     return
 
-                # 更新 Repository 记录
+                # 更新 Repository 记录（仅更新本地路径，状态将在全流程完成后更新为 READY）
                 repo = await db.get(Repository, repo_id)
                 if repo:
                     repo.local_path = local_path
-                    repo.status = RepoStatus.READY
                 await db.flush()
 
                 # 获取当前 HEAD commit hash（用于增量同步）
@@ -224,6 +223,7 @@ async def _run_task(
                 # ===== 完成 =====
                 await _update_task(db, task_id, TaskStatus.COMPLETED, 100, "处理完成")
                 if repo:
+                    repo.status = RepoStatus.READY
                     repo.last_synced_at = datetime.now(timezone.utc)
                 await db.commit()
 

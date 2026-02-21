@@ -48,6 +48,9 @@ Repository: {repo_name}
 Languages detected: {languages}
 Key files: {key_files}
 
+Output language: {language}
+All section titles, page titles, and any text content in the XML MUST be written in {language}. Do not use any other language.
+
 Return your analysis in the following XML format:
 <wiki_structure>
   <title>[Repository name - Wiki Title]</title>
@@ -84,6 +87,9 @@ Page title: {page_title}
 Section: {section_title}
 Repository: {repo_name}
 
+Output language: {language}
+The entire page content MUST be written in {language}. Do not use any other language.
+
 Below is the relevant source code from the repository:
 
 <code_context>
@@ -115,6 +121,7 @@ async def generate_wiki(
     from app.config import settings
     adapter = create_adapter(llm_provider)
     model = llm_model or settings.DEFAULT_LLM_MODEL
+    language = settings.WIKI_LANGUAGE
     collection = get_collection(repo_id)
 
     logger.info(f"[WikiGenerator] 开始生成 Wiki: repo_id={repo_id} provider={llm_provider} model={model}")
@@ -127,7 +134,7 @@ async def generate_wiki(
 
     outline_messages = [
         LLMMessage(role="system", content=MERMAID_CONSTRAINT_PROMPT),
-        LLMMessage(role="user", content=WIKI_OUTLINE_PROMPT.format(**repo_summary)),
+        LLMMessage(role="user", content=WIKI_OUTLINE_PROMPT.format(**repo_summary, language=language)),
     ]
 
     outline_response = await adapter.generate_with_rate_limit(
@@ -191,7 +198,7 @@ async def generate_wiki(
 
             content = await _generate_page_content(
                 adapter, model, page_data, section_data["title"],
-                repo_summary["repo_name"], code_context,
+                repo_summary["repo_name"], code_context, language,
             )
 
             page = WikiPage(
@@ -212,6 +219,7 @@ async def generate_wiki(
 async def _generate_page_content(
     adapter, model: str, page_data: dict,
     section_title: str, repo_name: str, code_context: str,
+    language: str = "Chinese",
 ) -> str:
     """生成单页内容并校验 Mermaid"""
     messages = [
@@ -222,6 +230,7 @@ async def _generate_page_content(
             repo_name=repo_name,
             code_context=code_context,
             mermaid_constraints=MERMAID_CONSTRAINT_PROMPT,
+            language=language,
         )),
     ]
 
