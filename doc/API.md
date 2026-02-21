@@ -1,6 +1,6 @@
 # API 接口文档
 
-> **版本**: 1.0.0 | **最后更新**: 2026-02-20
+> **版本**: 1.1.0 | **最后更新**: 2026-02-21
 >
 > Base URL: `http://localhost:8000`
 
@@ -369,3 +369,49 @@ es.onmessage = (event) => {
     "order_index": 0
 }
 ```
+
+---
+
+## 错误恢复指南
+
+### 故障场景与推荐操作
+
+| 故障场景 | 现象 | 推荐操作 |
+|---------|------|---------|
+| 任务卡死（Celery 进程被强制终止） | 任务状态永久停在 `cloning`/`parsing`/`embedding`/`generating` | 删除仓库后重新提交 |
+| Wiki 内容需要更新（代码未变） | 已有 Wiki 但内容过时 | 调用 Wiki 重新生成接口 |
+| Wiki 内容错误，需完全重来 | Wiki 存在但内容质量差 | 删除 Wiki 后重新生成 |
+| LLM Key 失效后恢复 | 任务 `failed_at_stage="generating"` | 修复 Key 后调用 reprocess |
+| 代码有新提交，需要同步 | 仓库已就绪但内容过时 | 重新提交同 URL（触发增量同步）|
+| 任意阶段失败，需完整重跑 | `failed_at_stage` 为任意值 | 调用 reprocess（无需删除重建）|
+
+### 典型恢复流程
+
+#### 情景 1：进程崩溃，任务卡死
+
+```
+1. DELETE /api/repositories/{repo_id}     # 清除所有数据，释放卡死状态
+2. POST /api/repositories                 # 重新提交，从头开始完整处理
+3. GET /api/tasks/{task_id}/stream        # SSE 订阅进度
+```
+
+#### 情景 2：仅重新生成 Wiki（代码解析结果保留）
+
+```
+1. DELETE /api/wiki/{repo_id}             # 可选，清除旧 Wiki
+2. POST /api/wiki/{repo_id}/regenerate    # 直接重生成（跳过克隆/解析/向量化）
+3. GET /api/tasks/{task_id}/stream        # SSE 订阅进度
+```
+
+#### 情景 3：强制全量重新处理（保留仓库记录）
+
+```
+1. POST /api/repositories/{repo_id}/reprocess   # 强制 FULL_PROCESS
+2. GET /api/tasks/{task_id}/stream               # SSE 订阅进度
+```
+
+### 任务重试机制
+
+Celery 任务内置自动重试：**最多 2 次**，退避间隔 **30s → 60s**。重试前会将任务状态重置为 `pending`，前端可通过 SSE 观察到状态恢复。
+
+若连续 2 次重试均失败，任务最终置为 `failed`，需手动通过上述恢复流程处理。
