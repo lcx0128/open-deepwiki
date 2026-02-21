@@ -49,3 +49,4 @@ class Repository(Base):
     file_states = relationship(
         "FileState", back_populates="repository", cascade="all, delete-orphan"
     )
+    wikis = relationship("Wiki", back_populates="repository", cascade="all, delete-orphan")

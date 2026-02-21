@@ -149,3 +149,88 @@ alembic revision --autogenerate -m "add_new_column"
 # 查看当前版本
 alembic current
 ```
+
+---
+
+## wikis 表
+
+**业务含义**: 存储每个仓库对应的 Wiki 文档元信息，一个仓库只保留最新的 Wiki。
+
+| 列名 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | VARCHAR(36) | PK, UUID4 | 全局唯一标识 |
+| `repo_id` | VARCHAR(36) | FK(repositories.id) CASCADE | 所属仓库 ID |
+| `title` | VARCHAR(512) | NOT NULL | Wiki 标题 |
+| `outline_json` | JSON | NULLABLE | XML 解析后的大纲结构，包含 sections 和 pages 树 |
+| `llm_provider` | VARCHAR(64) | NULLABLE | 生成时使用的 LLM 供应商：openai/dashscope/gemini/custom |
+| `llm_model` | VARCHAR(128) | NULLABLE | 生成时使用的模型名称 |
+| `created_at` | DATETIME | NOT NULL | Wiki 创建时间 |
+
+**索引**:
+- 主键索引: `id`
+- 普通索引: `repo_id`
+
+**外键约束**: `repo_id` → `repositories.id`，`ON DELETE CASCADE`
+
+---
+
+## wiki_sections 表
+
+**业务含义**: Wiki 的章节（Section），每个 Wiki 包含多个有序章节。
+
+| 列名 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | VARCHAR(36) | PK, UUID4 | 全局唯一标识 |
+| `wiki_id` | VARCHAR(36) | FK(wikis.id) CASCADE | 所属 Wiki ID |
+| `title` | VARCHAR(512) | NOT NULL | 章节标题 |
+| `order_index` | INTEGER | NOT NULL, DEFAULT 0 | 章节排序索引 |
+
+**索引**:
+- 主键索引: `id`
+- 普通索引: `wiki_id`
+
+**外键约束**: `wiki_id` → `wikis.id`，`ON DELETE CASCADE`
+
+---
+
+## wiki_pages 表
+
+**业务含义**: Wiki 的具体页面（Page），每个章节包含多个有序页面，存储 LLM 生成的 Markdown 内容。
+
+| 列名 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | VARCHAR(36) | PK, UUID4 | 全局唯一标识 |
+| `section_id` | VARCHAR(36) | FK(wiki_sections.id) CASCADE | 所属章节 ID |
+| `title` | VARCHAR(512) | NOT NULL | 页面标题 |
+| `importance` | VARCHAR(16) | NULLABLE, DEFAULT 'medium' | 重要程度：high/medium/low |
+| `content_md` | TEXT | NULLABLE | LLM 生成的 Markdown 内容，含代码块和 Mermaid 图 |
+| `relevant_files` | JSON | NULLABLE | 关联的源文件路径列表（JSON 数组） |
+| `order_index` | INTEGER | NOT NULL, DEFAULT 0 | 页面排序索引 |
+
+**索引**:
+- 主键索引: `id`
+- 普通索引: `section_id`
+
+**外键约束**: `section_id` → `wiki_sections.id`，`ON DELETE CASCADE`
+
+---
+
+## 表关系图（更新）
+
+```
+repositories (1) ──── (N) tasks
+     │
+     ├──── (N) file_states
+     │
+     └──── (N) wikis (1) ──── (N) wiki_sections (1) ──── (N) wiki_pages
+```
+
+---
+
+## 迁移版本
+
+| 版本 | 文件 | 说明 |
+|------|------|------|
+| 001 | `20260220_001_initial_schema.py` | 初始表结构（repositories, tasks, file_states） |
+| 002 | `20260221_002_add_failed_at_stage.py` | tasks 表新增 failed_at_stage 字段 |
+| 003 | `20260221_003_add_wiki_tables.py` | 新增 Wiki 文档表（wikis, wiki_sections, wiki_pages） |

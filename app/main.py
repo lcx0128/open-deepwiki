@@ -53,9 +53,11 @@ app.add_middleware(
 # 注册路由
 from app.api.repositories import router as repositories_router
 from app.api.tasks import router as tasks_router
+from app.api.wiki import router as wiki_router
 
 app.include_router(repositories_router)
 app.include_router(tasks_router)
+app.include_router(wiki_router)
 
 
 @app.get("/health", tags=["health"])
