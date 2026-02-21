@@ -2,9 +2,10 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 export interface ChunkRef {
-  filePath: string
-  startLine: number
-  endLine: number
+  file_path: string
+  start_line: number
+  end_line: number
+  name: string
 }
 
 export interface ChatMessage {

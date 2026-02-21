@@ -54,10 +54,12 @@ app.add_middleware(
 from app.api.repositories import router as repositories_router
 from app.api.tasks import router as tasks_router
 from app.api.wiki import router as wiki_router
+from app.api.chat import router as chat_router
 
 app.include_router(repositories_router)
 app.include_router(tasks_router)
 app.include_router(wiki_router)
+app.include_router(chat_router)
 
 
 @app.get("/health", tags=["health"])

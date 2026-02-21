@@ -127,10 +127,6 @@ onUnmounted(() => {
             {{ s }}
           </button>
         </div>
-        <!-- 提示：模块五未实现 -->
-        <div class="alert alert-warning" style="margin-top:20px;text-align:left;max-width:480px;">
-          ⚠ 注意：AI 问答功能依赖后端模块五（RAG）实现，当前版本后端尚未提供 /api/chat/stream 端点。
-        </div>
       </div>
 
       <!-- 消息列表 -->

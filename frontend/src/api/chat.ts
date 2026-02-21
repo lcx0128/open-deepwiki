@@ -1,6 +1,12 @@
-// 对话 API - 对应模块五（RAG + 对话），当前为占位实现
+// 对话 API - 对应模块五（RAG + 对话）
 // 后端端点: GET /api/chat/stream?repo_id=&session_id=&query=
-// 注意：模块五尚未实现，此处提供前端占位接口
+
+export interface ChunkRef {
+  file_path: string
+  start_line: number
+  end_line: number
+  name: string
+}
 
 export interface ChatStreamOptions {
   repoId: string
@@ -8,7 +14,7 @@ export interface ChatStreamOptions {
   query: string
   onSessionId: (sessionId: string) => void
   onToken: (token: string) => void
-  onChunkRefs: (refs: Array<{ filePath: string; startLine: number; endLine: number }>) => void
+  onChunkRefs: (refs: ChunkRef[]) => void
   onDone: () => void
   onError: (message: string) => void
 }
@@ -43,7 +49,7 @@ export function createChatStream(options: ChatStreamOptions): EventSource {
           break
         case 'error':
           eventSource.close()
-          options.onError(data.message || '未知错误')
+          options.onError(data.error || '未知错误')
           break
       }
     } catch {

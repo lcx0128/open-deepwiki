@@ -192,3 +192,14 @@ async def embed_chunks(
 
         await db.flush()
     return all_chunk_ids
+
+
+async def embed_query(text: str) -> List[float]:
+    """
+    将查询文本转换为 embedding 向量（用于 RAG 检索）。
+
+    与 embed_chunks 使用相同的 Embedding 模型，确保向量空间一致。
+    单条文本，无需批处理。
+    """
+    embeddings = await _call_embedding_api([text])
+    return embeddings[0]

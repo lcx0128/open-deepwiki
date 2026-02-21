@@ -415,3 +415,271 @@ es.onmessage = (event) => {
 Celery 任务内置自动重试：**最多 2 次**，退避间隔 **30s → 60s**。重试前会将任务状态重置为 `pending`，前端可通过 SSE 观察到状态恢复。
 
 若连续 2 次重试均失败，任务最终置为 `failed`，需手动通过上述恢复流程处理。
+
+---
+
+## 多轮对话接口（Module 5 RAG 层）
+
+### POST /api/chat
+
+基于 RAG 的多轮对话端点（非流式）。接收用户提问，执行双阶段检索和查询融合，返回 LLM 生成的回答及代码引用。
+
+**请求体**:
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `repo_id` | string | 是 | 仓库 UUID |
+| `session_id` | string | 否 | 会话 ID，首次调用传 null，后续调用传已有 session_id |
+| `query` | string | 是 | 用户提问 |
+| `llm_provider` | string | 否 | LLM 供应商（openai/dashscope/gemini/custom），不填则使用环境变量默认值 |
+| `llm_model` | string | 否 | LLM 模型名称，不填则使用 gpt-4o |
+
+**请求示例**:
+
+```json
+{
+    "repo_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "session_id": null,
+    "query": "请解释一下项目的核心架构是如何设计的？",
+    "llm_provider": "openai",
+    "llm_model": "gpt-4o"
+}
+```
+
+**成功响应 (200)**:
+
+```json
+{
+    "session_id": "c5d6e7f8-9a0b-1cde-f234-567890abcdef",
+    "answer": "项目采用分层架构，包括四个核心模块...\n\n**代码引用**：\n- `src/app/main.py:1-50` 应用入口\n- `src/app/config.py:100-150` 配置管理",
+    "chunk_refs": [
+        {
+            "file_path": "src/app/main.py",
+            "start_line": 1,
+            "end_line": 50,
+            "name": "FastAPI Application"
+        },
+        {
+            "file_path": "src/app/config.py",
+            "start_line": 100,
+            "end_line": 150,
+            "name": "Settings Configuration"
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 2500,
+        "completion_tokens": 1200,
+        "total_tokens": 3700
+    }
+}
+```
+
+**错误响应**:
+
+| HTTP 状态码 | 错误码 | 场景 |
+|-----------|-------|------|
+| 400 | `INVALID_REQUEST` | 请求参数无效或缺少必填字段 |
+| 404 | `REPO_NOT_FOUND` | 仓库不存在 |
+| 404 | `NO_EMBEDDINGS` | 仓库未生成向量嵌入（Wiki 未就绪） |
+| 500 | `LLM_ERROR` | LLM 调用失败或内部服务错误 |
+
+**工作流程**:
+
+1. **会话管理**：创建或恢复对话会话（Redis 存储，Key 格式 `conversation:{session_id}`，TTL 24 小时）
+2. **查询融合**：将多轮对话上下文与当前问题合并为独立查询，解决代词指代问题
+3. **Stage 1 检索**：ChromaDB 语义搜索，返回最相关的 10 个代码块摘要（仅包含 `file_path` 和 `start_line:end_line`）
+4. **Stage 2 组装**：获取前 5 个最相关代码块的完整内容及符号名称
+5. **Token 预算管理**：计算回答所需 Token 数，若超出上下文窗口则降级（移除 RAG 上下文或截断历史）
+6. **LLM 生成**：调用 LLM 生成回答，回答中包含代码溯源注释（格式 `file_path:start_line-end_line`）
+7. **持久化**：将本轮问答写回 Redis 会话，刷新 TTL
+
+---
+
+### GET /api/chat/stream
+
+基于 RAG 的多轮对话端点（SSE 流式）。与 `/api/chat` 功能相同，但以 Server-Sent Events 格式逐条推送生成的 Token 和最终的代码引用列表。
+
+**查询参数**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `repo_id` | string | 是 | 仓库 UUID |
+| `query` | string | 是 | 用户提问 |
+| `session_id` | string | 否 | 会话 ID，首次为空 |
+| `llm_provider` | string | 否 | LLM 供应商，不填则使用环境变量默认值 |
+| `llm_model` | string | 否 | LLM 模型，不填则使用 gpt-4o |
+
+**响应格式**: `text/event-stream`
+
+**响应 Headers**:
+
+```
+Content-Type: text/event-stream
+Cache-Control: no-cache
+X-Accel-Buffering: no
+```
+
+**SSE 事件流示例**:
+
+```
+data: {"type": "session_id", "session_id": "c5d6e7f8-9a0b-1cde-f234-567890abcdef"}
+
+data: {"type": "token", "content": "项目"}
+
+data: {"type": "token", "content": "采用"}
+
+data: {"type": "token", "content": "分层"}
+
+data: {"type": "token", "content": "架构"}
+
+data: {"type": "chunk_refs", "refs": [{"file_path": "src/app/main.py", "start_line": 1, "end_line": 50, "name": "FastAPI Application"}, {"file_path": "src/app/config.py", "start_line": 100, "end_line": 150, "name": "Settings Configuration"}]}
+
+data: {"type": "done"}
+```
+
+**SSE 事件类型**:
+
+| 事件类型 | 说明 | 字段 |
+|---------|------|------|
+| `session_id` | 会话 ID（第一条事件） | `session_id` (string) |
+| `token` | 单个 token 片段 | `content` (string) |
+| `chunk_refs` | 代码引用列表（生成完成后） | `refs` (array of objects) |
+| `done` | 流式生成完成信号 | 无 |
+| `error` | 发生错误 | `error` (string) |
+
+**前端使用示例（JavaScript）**:
+
+```javascript
+const eventSource = new EventSource(
+    `/api/chat/stream?repo_id=${repoId}&query=${encodeURIComponent(query)}&session_id=${sessionId || ''}`
+);
+
+let answer = '';
+
+eventSource.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    switch (data.type) {
+        case 'session_id':
+            console.log('Session created:', data.session_id);
+            // 保存 session_id 用于后续对话
+            break;
+        case 'token':
+            answer += data.content;
+            console.log('Token received:', data.content);
+            break;
+        case 'chunk_refs':
+            console.log('Code references:', data.refs);
+            break;
+        case 'done':
+            console.log('Generation complete');
+            eventSource.close();
+            break;
+        case 'error':
+            console.error('Error:', data.error);
+            eventSource.close();
+            break;
+    }
+};
+
+eventSource.onerror = (err) => {
+    console.error('SSE connection error', err);
+    eventSource.close();
+};
+```
+
+**错误响应**:
+
+| HTTP 状态码 | 错误码 | 场景 |
+|-----------|-------|------|
+| 400 | `INVALID_REQUEST` | 查询参数无效或缺少必填参数 |
+| 404 | `REPO_NOT_FOUND` | 仓库不存在 |
+| 404 | `NO_EMBEDDINGS` | 仓库未生成向量嵌入 |
+| 500 | `LLM_STREAMING_ERROR` | LLM 流式调用失败 |
+
+---
+
+## 会话管理说明
+
+### 会话存储与生命周期
+
+- **存储位置**：Redis Hash，Key 格式 `conversation:{session_id}`
+- **会话 TTL**：24 小时（每次对话后自动刷新）
+- **首次对话**：客户端传入 `session_id: null`，服务端返回新生成的 session_id
+- **续接对话**：后续调用传入已有 session_id，服务端恢复会话上下文
+- **会话过期**：传入过期 session_id 时，服务端自动创建新会话（无报错提示）
+- **会话内容**：包含历史消息列表、关联仓库 ID、累计 Token 用量、会话创建时间戳
+
+### 会话上下文管理
+
+- **多轮对话上下文**：保留最近 10 轮问答对（FIFO 队列）
+- **上下文融合**：当前问题与历史问题合并，解决"它""这个"等代词指代问题
+- **Token 限制**：历史上下文总 Token 数不超过 4000，超出时从最早对话开始截断
+- **分离隔离**：不同 `repo_id` 的会话数据完全隔离，无法跨仓库共享
+
+### 客户端集成建议
+
+**1. 会话持久化（Vue + Pinia）**:
+
+```javascript
+// 在 Store 中保存 session_id
+defineStore('chat', {
+    state: () => ({
+        sessionId: localStorage.getItem('chatSessionId') || null,
+        repoId: null,
+    }),
+    actions: {
+        setSession(sessionId, repoId) {
+            this.sessionId = sessionId;
+            this.repoId = repoId;
+            localStorage.setItem('chatSessionId', sessionId);
+            localStorage.setItem('chatRepoId', repoId);
+        },
+        clearSession() {
+            this.sessionId = null;
+            this.repoId = null;
+            localStorage.removeItem('chatSessionId');
+            localStorage.removeItem('chatRepoId');
+        }
+    }
+});
+```
+
+**2. 切换仓库时清除旧会话**:
+
+```javascript
+function onRepositoryChange(newRepoId) {
+    if (store.repoId !== newRepoId) {
+        store.clearSession();  // 不同仓库需新建会话
+    }
+}
+```
+
+**3. 监测会话过期**:
+
+```javascript
+async function sendMessage(query) {
+    try {
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                repo_id: store.repoId,
+                session_id: store.sessionId,
+                query: query,
+            }),
+        });
+
+        if (response.status === 404 && response.error === 'SESSION_EXPIRED') {
+            store.clearSession();  // 清除过期会话，重新开始
+            return sendMessage(query);  // 递归重试
+        }
+
+        const data = await response.json();
+        store.setSession(data.session_id, store.repoId);  // 更新 session_id
+        return data;
+    } catch (error) {
+        console.error('Chat error', error);
+    }
+}
+```
