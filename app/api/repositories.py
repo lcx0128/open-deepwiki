@@ -13,6 +13,9 @@ from app.schemas.repository import (
     ReprocessRequest,
 )
 from app.utils.url_parser import parse_repo_url
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/repositories", tags=["repositories"])
 
@@ -208,3 +211,64 @@ async def reprocess_repository(
         status="pending",
         message="全量重新处理任务已提交",
     )
+
+
+@router.delete(
+    "/{repo_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除仓库及其所有关联数据",
+)
+async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    删除指定仓库及其全部关联数据：
+    - 撤销所有活跃 Celery 任务（解除情景1卡死状态）
+    - 数据库：Repository、Task、FileState、Wiki、WikiSection、WikiPage（级联删除）
+    - ChromaDB：删除该仓库的向量集合
+    - 本地磁盘：删除克隆目录
+
+    删除后可重新提交同 URL 以完整重建。
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+
+    # 1. 撤销所有活跃 Celery 任务（含卡死的中间状态任务）
+    active_result = await db.execute(
+        select(Task).where(
+            Task.repo_id == repo_id,
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+        )
+    )
+    for task in active_result.scalars().all():
+        if task.celery_task_id:
+            try:
+                from app.celery_app import celery_app
+                celery_app.control.revoke(task.celery_task_id, terminate=True)
+            except Exception:
+                pass  # broker 不可达时忽略，DB 级联删除仍会清理记录
+
+    local_path = repo.local_path
+
+    # 2. 删除 Repository（ORM cascade: Task、FileState、Wiki→Section→Page）
+    await db.delete(repo)
+    await db.commit()
+
+    # 3. 删除 ChromaDB 向量集合
+    try:
+        from app.services.embedder import delete_collection
+        delete_collection(repo_id)
+    except Exception as e:
+        logger.warning(f"[RepoAPI] 删除 ChromaDB 集合失败（已忽略）: {e}")
+
+    # 4. 删除本地克隆目录（含 .git 只读文件）
+    if local_path:
+        import shutil
+        from pathlib import Path
+        from app.tasks.git_operations import _remove_readonly
+        path = Path(local_path)
+        if path.exists():
+            try:
+                shutil.rmtree(path, onerror=_remove_readonly)
+                logger.info(f"[RepoAPI] 本地克隆目录已删除: {local_path}")
+            except Exception as e:
+                logger.warning(f"[RepoAPI] 删除本地目录失败（已忽略）: {e}")

@@ -114,6 +114,30 @@ async def regenerate_wiki(
     return WikiRegenerateResponse(task_id=task.id)
 
 
+@router.delete(
+    "/{repo_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除 Wiki 文档",
+)
+async def delete_wiki(repo_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    删除指定仓库的 Wiki 文档（含所有章节和页面），保留仓库、向量数据和任务记录。
+    删除后可立即调用 POST /api/wiki/{repo_id}/regenerate 重新生成。
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+
+    result = await db.execute(select(Wiki).where(Wiki.repo_id == repo_id))
+    wiki = result.scalar_one_or_none()
+    if not wiki:
+        raise HTTPException(status_code=404, detail="Wiki 不存在")
+
+    await db.delete(wiki)  # cascade: WikiSection → WikiPage
+    await db.commit()
+    logger.info(f"[WikiAPI] Wiki 已删除: repo_id={repo_id} wiki_id={wiki.id}")
+
+
 @router.get(
     "/{repo_id}/pages/{page_id}",
     summary="获取单个 Wiki 页面",

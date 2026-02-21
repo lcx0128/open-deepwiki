@@ -146,6 +146,27 @@ Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SS
 
 ---
 
+### DELETE /api/repositories/{repo_id} — 删除仓库
+
+删除指定仓库及其全部关联数据，适用于任意阶段卡死或需要完整重建的场景。
+
+**操作范围：**
+- 撤销所有活跃 Celery 任务（解除卡死状态）
+- 数据库：Repository、Task、FileState、Wiki、WikiSection、WikiPage（全部级联删除）
+- ChromaDB：删除该仓库的向量集合
+- 本地磁盘：删除克隆目录
+
+**成功响应 204**：无响应体
+
+**错误响应**:
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 仓库不存在 |
+
+**删除后恢复：** 重新提交同 URL（`POST /api/repositories`）即可完整重建。
+
+---
+
 ## 任务管理
 
 ### GET /api/tasks/{task_id}
@@ -312,6 +333,23 @@ es.onmessage = (event) => {
 |------------|-------|------|
 | 404 | - | 仓库不存在 |
 | 409 | `WIKI_REGENERATING` | 已有 Wiki 重生成任务在执行中 |
+
+---
+
+---
+
+### DELETE /api/wiki/{repo_id} — 删除 Wiki 文档
+
+删除指定仓库的 Wiki 文档（含所有章节和页面），保留仓库、ChromaDB 向量数据和任务记录。
+
+**成功响应 204**：无响应体
+
+**错误响应**:
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 仓库不存在或 Wiki 不存在 |
+
+**删除后恢复：** 调用 `POST /api/wiki/{repo_id}/regenerate` 直接重新生成（跳过克隆/解析/向量化）。
 
 ---
 
