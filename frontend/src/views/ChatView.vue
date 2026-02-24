@@ -26,6 +26,8 @@ const deepResearch = ref(false)
 const drIteration = ref(0)
 const drActive = ref(false)
 const drQuery = ref('')
+const drHistory = ref<Array<{ role: string; content: string }>>([])
+const drError = ref<string | null>(null)
 
 // Code panel state
 const codePanel = ref<{
@@ -61,12 +63,6 @@ function scrollToBottom() {
   })
 }
 
-function buildMessages(_currentQuery: string): Array<{ role: string; content: string }> {
-  return chatStore.messages
-    .filter(m => !m.content.startsWith('[继续第'))
-    .map(m => ({ role: m.role as string, content: m.content }))
-}
-
 async function handleSend(query: string) {
   if (chatStore.isLoading) return
   chatStore.addMessage({
@@ -77,6 +73,7 @@ async function handleSend(query: string) {
   })
   scrollToBottom()
   if (deepResearch.value) {
+    drHistory.value = [{ role: 'user', content: query }]
     await startDeepResearch(query, query)
   } else {
     await startNormalChat(query)
@@ -112,41 +109,66 @@ async function startNormalChat(query: string) {
 
 async function startDeepResearch(query: string, originalQuery: string) {
   drActive.value = true
+  drError.value = null
   drQuery.value = originalQuery
   drIteration.value++
-  chatStore.addMessage({
-    id: crypto.randomUUID(),
-    role: 'assistant',
-    content: '',
-    timestamp: Date.now(),
-    isStreaming: true,
-  })
-  chatStore.isLoading = true
-  scrollToBottom()
+
+  const isFinalRound = drIteration.value === 5
+
+  // 只有最终轮创建 assistant 气泡
+  if (isFinalRound) {
+    chatStore.addMessage({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now(),
+      isStreaming: true,
+    })
+    chatStore.isLoading = true
+    scrollToBottom()
+  }
+
   if (activeAbortController) activeAbortController.abort()
 
-  const messages = buildMessages(query)
+  const messagesForApi = [...drHistory.value]
+  let roundBuffer = ''
   let needsContinue = false
 
   activeAbortController = createDeepResearchStream({
     repoId: props.repoId,
     sessionId: chatStore.sessionId || undefined,
     query: originalQuery,
-    messages,
+    messages: messagesForApi,
     onSessionId: (sid) => { chatStore.sessionId = sid },
-    onToken: (token) => { chatStore.appendToLastAssistant(token); scrollToBottom() },
-    onChunkRefs: (refs) => { chatStore.setLastAssistantRefs(refs) },
+    onToken: (token) => {
+      if (isFinalRound) {
+        chatStore.appendToLastAssistant(token)
+        scrollToBottom()
+      } else {
+        roundBuffer += token  // 静默累积，不渲染
+      }
+    },
+    onChunkRefs: (refs) => {
+      if (isFinalRound) chatStore.setLastAssistantRefs(refs)
+    },
     onDeepResearchContinue: (_iteration) => { needsContinue = true },
     onDone: () => {
-      chatStore.finishStreaming()
+      if (isFinalRound) chatStore.finishStreaming()
+      else chatStore.isLoading = false
       activeAbortController = null
+
+      // 将本轮 assistant 输出写入 drHistory（后端需要计数）
+      const assistantContent = isFinalRound
+        ? (chatStore.messages[chatStore.messages.length - 1]?.content ?? '')
+        : roundBuffer
+      drHistory.value.push({ role: 'assistant', content: assistantContent })
+
       if (needsContinue && drIteration.value < 5) {
         drContinueTimer = setTimeout(() => {
-          chatStore.addMessage({
-            id: crypto.randomUUID(),
+          // 继续标记只进 drHistory，不进 chatStore
+          drHistory.value.push({
             role: 'user',
             content: `[继续第 ${drIteration.value + 1} 轮深度研究...]`,
-            timestamp: Date.now(),
           })
           startDeepResearch(originalQuery, originalQuery)
         }, 1500)
@@ -154,14 +176,21 @@ async function startDeepResearch(query: string, originalQuery: string) {
         drActive.value = false
         drIteration.value = 0
         drQuery.value = ''
+        drError.value = null
       }
     },
     onError: (message) => {
-      chatStore.updateLastAssistant(`[深度研究错误] ${message}`)
-      chatStore.finishStreaming()
       activeAbortController = null
+      if (isFinalRound) {
+        chatStore.updateLastAssistant(`[深度研究错误] ${message}`)
+        chatStore.finishStreaming()
+      } else {
+        drError.value = message  // 在进度卡片中显示错误
+        chatStore.isLoading = false
+      }
       drActive.value = false
       drIteration.value = 0
+      drQuery.value = ''
     },
   })
 }
@@ -173,6 +202,8 @@ function clearChat() {
   drActive.value = false
   drIteration.value = 0
   drQuery.value = ''
+  drError.value = null
+  drHistory.value = []
   chatStore.clearChat()
   codePanel.value = null
 }
@@ -332,6 +363,44 @@ onUnmounted(() => {
               @code-blocks="handleCodeBlocks"
               @code-block-focus="handleCodeBlockFocus"
             />
+
+            <Transition name="dr-fade">
+              <div v-if="drActive && drIteration < 5" class="dr-progress-card">
+
+                <div class="dr-progress-header">
+                  <span v-if="!drError" class="dr-progress-spinner" />
+                  <svg v-else class="dr-progress-error-icon" viewBox="0 0 24 24"
+                       fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <span>{{ drError ? '深度研究出错' : '深度研究进行中' }}</span>
+                </div>
+
+                <div class="dr-progress-steps">
+                  <template v-for="i in 5" :key="i">
+                    <div class="dr-step" :class="{
+                      'dr-step--done':    i < drIteration,
+                      'dr-step--active':  i === drIteration,
+                      'dr-step--pending': i > drIteration,
+                      'dr-step--error':   !!drError && i === drIteration,
+                    }">
+                      <div class="dr-step__dot" />
+                      <span class="dr-step__label">第{{ i }}轮</span>
+                    </div>
+                    <div v-if="i < 5" class="dr-step__connector"
+                         :class="{ 'dr-step__connector--done': i < drIteration }" />
+                  </template>
+                </div>
+
+                <div class="dr-progress-status" :class="{ 'dr-progress-status--error': drError }">
+                  <template v-if="drError">研究中断：{{ drError }}</template>
+                  <template v-else>正在进行第 {{ drIteration }} 轮研究，时间可能较长请耐心等待...</template>
+                </div>
+
+              </div>
+            </Transition>
           </div>
         </div>
 
@@ -814,4 +883,97 @@ onUnmounted(() => {
   .chat-left { flex: 0 0 100%; }
   .code-panel { display: none; }
 }
+
+/* ── Deep Research Progress Card ───────────────────────── */
+.dr-progress-card {
+  margin: 8px 0 4px;
+  padding: 16px 20px;
+  background: rgba(124, 58, 237, 0.06);
+  border: 1px solid rgba(124, 58, 237, 0.2);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.dr-progress-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #7c3aed;
+}
+.dr-progress-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(124, 58, 237, 0.25);
+  border-top-color: #7c3aed;
+  border-radius: 50%;
+  animation: dr-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes dr-spin { to { transform: rotate(360deg); } }
+.dr-progress-error-icon {
+  width: 14px;
+  height: 14px;
+  color: #ef4444;
+  flex-shrink: 0;
+}
+.dr-progress-steps {
+  display: flex;
+  align-items: flex-start;
+}
+.dr-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.dr-step__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid rgba(124, 58, 237, 0.2);
+  background: transparent;
+  transition: background 0.3s, border-color 0.3s, box-shadow 0.3s;
+}
+.dr-step--done    .dr-step__dot { background: #7c3aed; border-color: #7c3aed; }
+.dr-step--active  .dr-step__dot {
+  border-color: #7c3aed;
+  animation: dr-pulse-dot 1.2s ease-in-out infinite;
+}
+.dr-step--error   .dr-step__dot { background: #ef4444; border-color: #ef4444; animation: none; }
+.dr-step--pending .dr-step__dot { border-color: rgba(124, 58, 237, 0.15); }
+@keyframes dr-pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.2); }
+  50%       { box-shadow: 0 0 0 5px rgba(124, 58, 237, 0.07); }
+}
+.dr-step__label {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.dr-step--done .dr-step__label,
+.dr-step--active .dr-step__label { color: #7c3aed; }
+.dr-step__connector {
+  flex: 1;
+  height: 2px;
+  background: rgba(124, 58, 237, 0.12);
+  margin-top: 4px;
+  min-width: 16px;
+  transition: background 0.3s;
+}
+.dr-step__connector--done { background: #7c3aed; }
+.dr-progress-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.dr-progress-status--error { color: #ef4444; }
+.dr-fade-enter-active,
+.dr-fade-leave-active { transition: opacity 0.25s ease, transform 0.25s ease; }
+.dr-fade-enter-from,
+.dr-fade-leave-to     { opacity: 0; transform: translateY(6px); }
 </style>
