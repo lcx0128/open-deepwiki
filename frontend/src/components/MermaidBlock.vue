@@ -16,11 +16,17 @@ async function render() {
 
   const { svg, error } = await renderDiagram(props.id, props.code)
 
-  isRendering.value = false
   if (error) {
+    // 先设 error 再关 isRendering，两次赋值在同一批次合并，直接从 loading 跳到 fallback
     renderError.value = error
-  } else if (containerRef.value) {
-    containerRef.value.innerHTML = svg
+    isRendering.value = false
+  } else {
+    isRendering.value = false
+    // 必须等 DOM 更新后 containerRef div 才会挂载，否则 containerRef.value 为 null
+    await nextTick()
+    if (containerRef.value) {
+      containerRef.value.innerHTML = svg
+    }
   }
 }
 

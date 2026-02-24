@@ -31,6 +31,19 @@ def validate_mermaid(mermaid_code: str) -> List[str]:
         if pattern.search(mermaid_code):
             errors.append(description)
 
+    # 检查 graph/flowchart 图表中是否存在中文节点ID
+    # Mermaid 10.x 要求节点ID只能含 ASCII 字符，中文必须放在标签内如 A[中文标签]
+    if re.search(r'^\s*(?:graph|flowchart)\s+', mermaid_code, re.MULTILINE | re.IGNORECASE):
+        # 去除标签括号内容后检查是否还有中文字符
+        code_no_labels = re.sub(
+            r'\[[^\]\n]*\]|\([^)\n]*\)|\{[^}\n]*\}|"[^"\n]*"', '', mermaid_code
+        )
+        if re.search(r'[\u4e00-\u9fff]', code_no_labels):
+            errors.append(
+                "节点ID含中文字符：Mermaid 10.x 节点ID必须用ASCII英文，"
+                "中文只能放在标签内，示例：A[API网关] --> B[服务层]"
+            )
+
     # 括号匹配检查（跳过字符串字面量和注释）
     stack = []
     in_quote = False
