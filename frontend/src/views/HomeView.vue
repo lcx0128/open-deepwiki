@@ -46,6 +46,14 @@ const features = [
 const hasTask = computed(() => taskStore.currentTask !== null)
 const isCompleted = computed(() => taskStore.currentTask?.status === 'completed')
 const isFailed = computed(() => taskStore.currentTask?.status === 'failed')
+const isIncremental = computed(() => taskStore.currentTask?.type === 'incremental_sync')
+const taskTitle = computed(() => {
+  if (isCompleted.value) {
+    return isIncremental.value ? '增量更新完成' : 'Wiki 生成完成'
+  }
+  if (isFailed.value) return '处理失败'
+  return isIncremental.value ? '正在增量更新仓库...' : '正在处理仓库...'
+})
 
 // 页面挂载：从 URL 或 localStorage 恢复任务状态
 onMounted(async () => {
@@ -264,7 +272,7 @@ function resetAndSubmitNew() {
         <h2 class="task-title">
           <span v-if="isCompleted" class="task-title__status task-title__status--done">
             <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
-            Wiki 生成完成
+            {{ isIncremental ? '增量更新完成' : 'Wiki 生成完成' }}
           </span>
           <span v-else-if="isFailed" class="task-title__status task-title__status--failed">
             <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
@@ -272,7 +280,7 @@ function resetAndSubmitNew() {
           </span>
           <span v-else class="task-title__status task-title__status--running">
             <svg class="task-title__spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke-linecap="round"/></svg>
-            正在处理仓库...
+            {{ isIncremental ? '正在增量更新仓库...' : '正在处理仓库...' }}
           </span>
         </h2>
         <div class="task-actions">

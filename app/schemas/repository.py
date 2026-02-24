@@ -8,6 +8,11 @@ class ReprocessRequest(BaseModel):
     llm_model: Optional[str] = Field(None, description="模型名称")
 
 
+class IncrementalSyncRequest(BaseModel):
+    llm_provider: Optional[str] = Field(None, description="LLM 供应商标识")
+    llm_model: Optional[str] = Field(None, description="模型名称")
+
+
 class RepositoryCreateRequest(BaseModel):
     url: str = Field(..., description="Git 仓库完整 URL", examples=["https://github.com/owner/repo"])
     pat_token: Optional[str] = Field(None, description="私有仓库 PAT Token，用后即毁")

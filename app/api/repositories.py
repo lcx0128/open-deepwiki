@@ -12,6 +12,7 @@ from app.schemas.repository import (
     RepositoryListItem,
     RepositoryListResponse,
     ReprocessRequest,
+    IncrementalSyncRequest,
 )
 from app.utils.url_parser import parse_repo_url
 import logging
@@ -212,6 +213,73 @@ async def reprocess_repository(
         repo_id=repo_id,
         status="pending",
         message="全量重新处理任务已提交",
+    )
+
+
+@router.post(
+    "/{repo_id}/sync",
+    response_model=RepositoryCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="触发增量同步",
+)
+async def sync_repository(
+    repo_id: str,
+    request: IncrementalSyncRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    对已存在的仓库触发 INCREMENTAL_SYNC 任务（git pull + 只处理变更文件 + 重新生成 Wiki）。
+    要求仓库已克隆到本地（local_path 非空），否则返回 400。
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+
+    if not repo.local_path:
+        raise HTTPException(
+            status_code=400,
+            detail="仓库尚未克隆，请先提交完整处理任务",
+        )
+
+    # 检查是否有进行中的任务
+    active_result = await db.execute(
+        select(Task).where(
+            Task.repo_id == repo_id,
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+        )
+    )
+    active_task = active_result.scalars().first()
+    if active_task:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "REPO_PROCESSING",
+                "detail": "该仓库已有任务在执行中",
+                "existing_task_id": active_task.id,
+            },
+        )
+
+    task = Task(repo_id=repo_id, type=TaskType.INCREMENTAL_SYNC)
+    db.add(task)
+    repo.status = RepoStatus.SYNCING
+    await db.flush()
+
+    from app.tasks.process_repo import process_repository_task
+    celery_result = process_repository_task.delay(
+        task_id=task.id,
+        repo_id=repo_id,
+        repo_url=repo.url,
+        llm_provider=request.llm_provider,
+        llm_model=request.llm_model,
+    )
+    task.celery_task_id = celery_result.id
+    await db.commit()
+
+    return RepositoryCreateResponse(
+        task_id=task.id,
+        repo_id=repo_id,
+        status="pending",
+        message="增量同步任务已提交",
     )
 
 
