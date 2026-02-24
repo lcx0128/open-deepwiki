@@ -1,8 +1,6 @@
 import { ref } from 'vue'
 import mermaid from 'mermaid'
 
-let mermaidInitialized = false
-
 /**
  * 将 graph/flowchart 图表中的中文节点ID替换为安全的ASCII ID。
  * Mermaid 10.x 要求节点ID只能含 ASCII 字母/数字/下划线，中文字符作为节点ID会导致
@@ -88,7 +86,6 @@ export function useMermaid() {
   const isInitialized = ref(false)
 
   function initMermaid(isDark = false) {
-    if (mermaidInitialized) return
     mermaid.initialize({
       startOnLoad: false,
       theme: isDark ? 'dark' : 'default',
@@ -97,7 +94,6 @@ export function useMermaid() {
       sequence: { useMaxWidth: true },
       gantt: { useMaxWidth: true },
     })
-    mermaidInitialized = true
     isInitialized.value = true
   }
 
@@ -105,7 +101,8 @@ export function useMermaid() {
     id: string,
     code: string
   ): Promise<{ svg: string; error: string | null }> {
-    initMermaid()
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
+    initMermaid(isDark)
     const sanitized = sanitizeMermaidEr(sanitizeMermaidGraph(code))
     try {
       const { svg } = await mermaid.render(`mermaid-svg-${id}`, sanitized)

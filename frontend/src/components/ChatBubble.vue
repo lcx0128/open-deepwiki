@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import MarkdownView from './MarkdownView.vue'
-import type { ChatMessage } from '@/stores/chat'
+import type { ChatMessage, ChunkRef } from '@/stores/chat'
 
-const props = defineProps<{ message: ChatMessage }>()
+const props = defineProps<{ message: ChatMessage; compactCode?: boolean }>()
+
+const emit = defineEmits<{
+  'ref-click': [ref: ChunkRef]
+  'code-blocks': [payload: { messageId: string; blocks: Array<{id: string; lang: string; content: string}> }]
+  'code-block-focus': [blockId: string]
+}>()
 
 function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
@@ -11,37 +17,48 @@ function formatTime(ts: number) {
 
 <template>
   <div class="bubble-wrap" :class="`bubble-wrap--${message.role}`">
-    <!-- 头像 -->
+    <!-- Avatar -->
     <div class="bubble__avatar" :class="`bubble__avatar--${message.role}`">
       {{ message.role === 'user' ? '👤' : '🤖' }}
     </div>
 
-    <!-- 内容 -->
+    <!-- Content -->
     <div class="bubble__body">
-      <!-- 消息内容 -->
+      <!-- Message content -->
       <div class="bubble__content" :class="`bubble__content--${message.role}`">
-        <!-- AI 回答用 Markdown 渲染 -->
-        <MarkdownView v-if="message.role === 'assistant'" :content="message.content" />
+        <!-- AI answers use Markdown rendering -->
+        <MarkdownView
+          v-if="message.role === 'assistant'"
+          :content="message.content"
+          :compact-code="compactCode"
+          @code-blocks-extracted="blocks => emit('code-blocks', { messageId: message.id, blocks })"
+          @code-block-click="id => emit('code-block-focus', id)"
+        />
         <p v-else class="user-text">{{ message.content }}</p>
 
-        <!-- 流式光标 -->
+        <!-- Streaming cursor -->
         <span v-if="message.isStreaming" class="typing-cursor" />
       </div>
 
-      <!-- 代码引用 -->
+      <!-- Code refs -->
       <div v-if="message.chunkRefs?.length" class="bubble__refs">
         <span class="refs__label">参考代码:</span>
         <a
           v-for="(ref, i) in message.chunkRefs"
           :key="i"
           class="ref-chip"
-          :title="`${ref.filePath} 第 ${ref.startLine}-${ref.endLine} 行`"
+          :title="`${ref.file_path} 第 ${ref.start_line}-${ref.end_line} 行`"
+          @click="emit('ref-click', ref)"
         >
-          {{ ref.filePath.split('/').pop() }}:{{ ref.startLine }}-{{ ref.endLine }}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ref-chip__icon">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          {{ ref.file_path.split('/').pop() }}:{{ ref.start_line }}-{{ ref.end_line }}
         </a>
       </div>
 
-      <!-- 时间戳 -->
+      <!-- Timestamp -->
       <div class="bubble__time">{{ formatTime(message.timestamp) }}</div>
     </div>
   </div>
@@ -121,7 +138,9 @@ function formatTime(ts: number) {
 }
 
 .ref-chip {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-full);
@@ -129,8 +148,22 @@ function formatTime(ts: number) {
   font-size: var(--font-size-xs);
   font-family: var(--font-mono);
   color: var(--text-secondary);
-  cursor: default;
+  cursor: pointer;
   white-space: nowrap;
+  transition: all 0.15s;
+  text-decoration: none;
+}
+
+.ref-chip:hover {
+  background: var(--bg-active);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.ref-chip__icon {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
 }
 
 .bubble__time {

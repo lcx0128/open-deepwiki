@@ -99,7 +99,10 @@ onMounted(loadRepos)
         <p class="page-desc">管理已处理的代码仓库与 Wiki 文档</p>
       </div>
       <RouterLink to="/" class="btn btn-primary">
-        ＋ 添加仓库
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" style="width:14px;height:14px;margin-right:5px;vertical-align:-1px">
+          <path d="M8 2v12M2 8h12" stroke-linecap="round"/>
+        </svg>
+        添加仓库
       </RouterLink>
     </div>
 
@@ -127,8 +130,16 @@ onMounted(loadRepos)
           @click="filterStatus = 'pending'"
         >处理中</button>
       </div>
-      <button class="btn btn-ghost btn-sm" @click="loadRepos" :disabled="repoStore.isLoading">
-        {{ repoStore.isLoading ? '刷新中...' : '🔄 刷新' }}
+      <button class="btn btn-ghost btn-sm refresh-btn" @click="loadRepos" :disabled="repoStore.isLoading">
+        <svg
+          class="refresh-icon"
+          :class="{ 'refresh-icon--spinning': repoStore.isLoading }"
+          viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"
+        >
+          <path d="M13.5 2.5A7 7 0 1 0 14 8" stroke-linecap="round"/>
+          <path d="M14 2.5V6h-3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        {{ repoStore.isLoading ? '刷新中...' : '刷新' }}
       </button>
     </div>
 
@@ -143,7 +154,11 @@ onMounted(loadRepos)
 
     <!-- 空状态 -->
     <div v-else-if="filteredRepos.length === 0" class="list-empty">
-      <div class="list-empty__icon">📂</div>
+      <div class="list-empty__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
       <h3>暂无仓库</h3>
       <p>还没有处理过任何仓库，去首页添加一个吧</p>
       <RouterLink to="/" class="btn btn-primary">添加仓库</RouterLink>
@@ -202,8 +217,7 @@ onMounted(loadRepos)
             <span v-else>重新处理</span>
           </button>
           <button
-            class="btn btn-ghost btn-sm"
-            style="color:#ef4444"
+            class="btn btn-ghost btn-sm btn-danger-ghost"
             :disabled="actionLoading === repo.id"
             @click="deleteTarget = repo"
           >
@@ -233,22 +247,26 @@ onMounted(loadRepos)
 .repo-list-view {
   max-width: 1100px;
   margin: 0 auto;
-  padding: 32px 20px;
+  padding: 36px 20px 80px;
   width: 100%;
 }
 
+/* ── Page header ──────────────────────────────────── */
 .page-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .page-title {
-  font-size: var(--font-size-3xl);
+  font-size: var(--font-size-2xl);
   font-weight: 700;
   color: var(--text-primary);
   margin-bottom: 4px;
+  letter-spacing: -0.02em;
 }
 
 .page-desc {
@@ -256,6 +274,7 @@ onMounted(loadRepos)
   font-size: var(--font-size-sm);
 }
 
+/* ── Filter bar ───────────────────────────────────── */
 .filter-bar {
   display: flex;
   justify-content: space-between;
@@ -268,7 +287,7 @@ onMounted(loadRepos)
 .filter-group { display: flex; gap: 4px; }
 
 .filter-btn {
-  padding: 6px 14px;
+  padding: 5px 14px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-full);
   background: var(--bg-primary);
@@ -276,27 +295,67 @@ onMounted(loadRepos)
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s;
+  font-weight: 500;
 }
-.filter-btn:hover { background: var(--bg-hover); }
+.filter-btn:hover { background: var(--bg-hover); border-color: var(--border-color-strong); }
 .filter-btn--active {
   background: var(--color-primary);
   color: white;
   border-color: var(--color-primary);
 }
 
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.refresh-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  transition: transform 0.6s;
+}
+
+.refresh-icon--spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ── Loading / empty ──────────────────────────────── */
 .list-loading, .list-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  padding: 60px 20px;
+  padding: 64px 20px;
   color: var(--text-muted);
 }
 
-.list-empty__icon { font-size: 48px; }
-.list-empty h3 { font-size: var(--font-size-xl); color: var(--text-secondary); }
+.list-empty__icon {
+  width: 56px;
+  height: 56px;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.list-empty__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.list-empty h3 {
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
 .list-empty p { font-size: var(--font-size-sm); color: var(--text-muted); }
 
+/* ── Repo grid ────────────────────────────────────── */
 .repo-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -307,10 +366,16 @@ onMounted(loadRepos)
   display: flex;
   flex-direction: column;
   gap: 10px;
-  transition: box-shadow 0.2s;
+  transition: all 0.2s;
+  border-radius: var(--radius-lg);
+  padding: 18px;
 }
 
-.repo-card:hover { box-shadow: var(--shadow-md); }
+.repo-card:hover {
+  border-color: var(--border-color-strong);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
 
 .repo-card__header {
   display: flex;
@@ -371,10 +436,20 @@ onMounted(loadRepos)
   margin-top: 4px;
 }
 
+.btn-danger-ghost {
+  color: #ef4444;
+}
+.btn-danger-ghost:hover:not(:disabled) {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+/* ── Delete modal ─────────────────────────────────── */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.5);
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
   z-index: 1000;
   display: flex;
   align-items: center;
@@ -387,7 +462,7 @@ onMounted(loadRepos)
   width: 100%;
 }
 
-.modal h3 { margin-bottom: 12px; font-size: var(--font-size-lg); }
+.modal h3 { margin-bottom: 12px; font-size: var(--font-size-lg); font-weight: 600; }
 .modal p {
   font-size: var(--font-size-sm);
   color: var(--text-secondary);
@@ -401,6 +476,7 @@ onMounted(loadRepos)
   gap: 8px;
 }
 
+/* ── Responsive ───────────────────────────────────── */
 @media (max-width: 640px) {
   .repo-grid { grid-template-columns: 1fr; }
   .page-header { flex-direction: column; gap: 16px; }

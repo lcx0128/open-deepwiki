@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useMermaid } from '@/composables/useMermaid'
 
 const props = defineProps<{ code: string; id: string }>()
@@ -8,6 +8,8 @@ const containerRef = ref<HTMLElement | null>(null)
 const renderError = ref<string | null>(null)
 const isRendering = ref(false)
 const { renderDiagram } = useMermaid()
+
+let themeObserver: MutationObserver | null = null
 
 async function render() {
   if (!props.code?.trim()) return
@@ -30,7 +32,22 @@ async function render() {
   }
 }
 
-onMounted(() => nextTick(render))
+onMounted(() => {
+  nextTick(render)
+  // Watch theme changes and re-render
+  themeObserver = new MutationObserver(() => {
+    nextTick(render)
+  })
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
+})
+
+onUnmounted(() => {
+  themeObserver?.disconnect()
+})
+
 watch(() => props.code, () => nextTick(render))
 </script>
 
@@ -112,5 +129,39 @@ watch(() => props.code, () => nextTick(render))
   font-size: var(--font-size-sm);
   margin: 0;
   line-height: 1.6;
+}
+
+/* Fix mermaid SVG text color in dark mode */
+[data-theme="dark"] .mermaid-svg :deep(svg) {
+  filter: none;
+}
+
+[data-theme="dark"] .mermaid-svg :deep(.label) {
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .mermaid-svg :deep(text) {
+  fill: #e2e8f0 !important;
+}
+
+[data-theme="dark"] .mermaid-svg :deep(.node rect),
+[data-theme="dark"] .mermaid-svg :deep(.node circle),
+[data-theme="dark"] .mermaid-svg :deep(.node polygon) {
+  fill: #1e1e2e !important;
+  stroke: #3b82f6 !important;
+}
+
+[data-theme="dark"] .mermaid-svg :deep(.edgeLabel) {
+  background-color: #1a1a1a !important;
+  color: #e2e8f0 !important;
+}
+
+[data-theme="dark"] .mermaid-svg :deep(.edgePath .path) {
+  stroke: #4b5563 !important;
+}
+
+[data-theme="dark"] .mermaid-fallback__header {
+  background: #1a1a00;
+  color: #fcd34d;
 }
 </style>

@@ -44,7 +44,13 @@ export const useChatStore = defineStore('chat', () => {
   function setLastAssistantRefs(refs: ChunkRef[]) {
     const last = messages.value[messages.value.length - 1]
     if (last && last.role === 'assistant') {
-      last.chunkRefs = refs
+      const seen = new Set<string>()
+      last.chunkRefs = refs.filter(r => {
+        const key = `${r.file_path}:${r.start_line}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
     }
   }
 
