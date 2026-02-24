@@ -1,6 +1,6 @@
 # API 接口文档
 
-> **版本**: 1.1.0 | **最后更新**: 2026-02-21
+> **版本**: 1.2.0 | **最后更新**: 2026-02-24
 >
 > Base URL: `http://localhost:8000`
 
@@ -422,7 +422,9 @@ Celery 任务内置自动重试：**最多 2 次**，退避间隔 **30s → 60s*
 
 ### POST /api/chat
 
-基于 RAG 的多轮对话端点（非流式）。接收用户提问，执行双阶段检索和查询融合，返回 LLM 生成的回答及代码引用。
+基于 RAG 的多轮对话端点。
+- `deep_research=false`（默认）：非流式，返回 JSON `ChatResponse`
+- `deep_research=true`：流式 SSE，触发最多 5 轮迭代深度研究
 
 **请求体**:
 
@@ -433,6 +435,8 @@ Celery 任务内置自动重试：**最多 2 次**，退避间隔 **30s → 60s*
 | `query` | string | 是 | 用户提问 |
 | `llm_provider` | string | 否 | LLM 供应商（openai/dashscope/gemini/custom），不填则使用环境变量默认值 |
 | `llm_model` | string | 否 | LLM 模型名称，不填则使用 gpt-4o |
+| `deep_research` | boolean | 否 | 是否启用 Deep Research 模式，默认 false |
+| `messages` | array | 否 | Deep Research 模式下传入的完整对话历史（`[{"role":"user","content":"..."}]`） |
 
 **请求示例**:
 
@@ -508,6 +512,7 @@ Celery 任务内置自动重试：**最多 2 次**，退避间隔 **30s → 60s*
 | `session_id` | string | 否 | 会话 ID，首次为空 |
 | `llm_provider` | string | 否 | LLM 供应商，不填则使用环境变量默认值 |
 | `llm_model` | string | 否 | LLM 模型，不填则使用 gpt-4o |
+| `deep_research` | boolean | 否 | 是否启用 Deep Research 模式，默认 false |
 
 **响应格式**: `text/event-stream`
 
@@ -544,6 +549,7 @@ data: {"type": "done"}
 | `session_id` | 会话 ID（第一条事件） | `session_id` (string) |
 | `token` | 单个 token 片段 | `content` (string) |
 | `chunk_refs` | 代码引用列表（生成完成后） | `refs` (array of objects) |
+| `deep_research_continue` | Deep Research 非最终轮完成，提示继续（仅 `deep_research=true`） | `iteration` (int), `next_iteration` (int) |
 | `done` | 流式生成完成信号 | 无 |
 | `error` | 发生错误 | `error` (string) |
 
