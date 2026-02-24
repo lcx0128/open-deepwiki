@@ -31,7 +31,7 @@ Repository（仓库）
 | 字段 | 含义 |
 |---|---|
 | `url` | 仓库原始 URL（唯一键，用于判断是否已存在） |
-| `status` | `pending` / `cloning` / `ready` / `error` |
+| `status` | `pending` / `cloning` / `ready` / `error` / `syncing` |
 | `local_path` | 克隆到本地的路径，格式为 `./repos/{repo_id}` |
 | `last_synced_at` | 最近一次成功处理完成的时间 |
 
@@ -104,6 +104,15 @@ if 该 URL 的 Repository 已存在:
     else → 创建 INCREMENTAL_SYNC Task
 else:
     创建新 Repository + FULL_PROCESS Task
+```
+
+`POST /api/repositories/{repo_id}/sync`（显式增量同步）：
+
+```python
+# 要求 repo.local_path 非空（首次克隆已完成），否则返回 400
+# 检测活跃任务，有则返回 409
+# 创建 INCREMENTAL_SYNC Task，设置 repo.status = SYNCING
+# 返回 task_id 供前端订阅 SSE 进度
 ```
 
 **强制全量重建**（`force_full=True`）：
@@ -206,18 +215,69 @@ return (all_chunks, file_hashes)
 
 ## 十、增量同步设计
 
-增量同步的核心是 `FileState.file_hash`：
+增量同步的核心是 `FileState.file_hash` + `apply_incremental_sync()` 的协作：
 
 ```
 上次成功处理 → FileState 写入（file_hash = H_old）
                     ↓
 代码仓库更新（某些文件变更）
                     ↓
-INCREMENTAL_SYNC 触发
-  ├── 文件 hash 未变 → FileState.file_hash == 计算结果 → 跳过
-  └── 文件 hash 已变 → 重新解析 + 向量化 → 更新 FileState
+INCREMENTAL_SYNC 触发（通过 /sync 端点或重新提交同 URL）
+  │
+  ├── Stage 1: apply_incremental_sync()
+  │     ├── git fetch origin {branch}
+  │     ├── git diff HEAD..origin/{branch} --name-status → 获取变更文件列表
+  │     ├── git merge origin/{branch} → 拉取最新代码
+  │     └── ChromaDB 清理: 删除状态为 'D' 的文件对应的所有 chunk 向量
+  │
+  └── Stage 2-4: 正常四阶段流程（force_full=False）
+        ├── Parser: 文件 hash 未变 → 跳过（FileState 命中）
+        ├── Parser: 文件 hash 已变 → 重新解析
+        └── Embedder: 仅处理变更文件 chunks，更新 FileState
 ```
 
-**当前未实现**（计划在 Module 3 后）：
-- 已删除文件的 ChromaDB 向量清理（需读取 git diff `D` 状态）
-- 文件重命名检测
+### Stage 1 分支逻辑（process_repo.py）
+
+```python
+is_incremental = (task_record.type == TaskType.INCREMENTAL_SYNC)
+
+if is_incremental:
+    # 读取本地路径和分支
+    local_path = repo.local_path
+    sync_branch = branch or repo.default_branch or "main"
+    # 执行 git 操作 + ChromaDB 清理
+    sync_stats = await apply_incremental_sync(db, repo_id, local_path, collection, branch=sync_branch)
+    # git 操作失败时记录 warning，继续执行（降级为 hash-only 模式）
+else:
+    # 原 clone_repository() 逻辑
+    success, error = await clone_repository(repo_url, local_path, pat_token, branch)
+```
+
+### sync_stats 结构
+
+`apply_incremental_sync()` 返回字典，通过 SSE 事件推送给前端：
+
+```json
+{
+  "added": 3,
+  "modified": 2,
+  "deleted": 1
+}
+```
+
+### 删除文件处理
+
+`apply_incremental_sync()` 内部对 `git diff` 输出中状态为 `D`（deleted）的文件调用 `_delete_file_chunks()`，从 ChromaDB collection 中删除该文件所有 chunk 向量，并从 `FileState` 表中删除对应记录。
+
+### INCREMENTAL_SYNC 允许 chunks=0
+
+若所有文件 hash 均未变更，Parser 返回空 chunks，Embedder 无写入，Wiki 重新生成。这是合法状态（表示代码未变但重新生成 Wiki），不视为失败。
+
+### repo.status 生命周期（增量）
+
+```
+ready → [/sync 触发] → syncing → [Task 完成] → ready
+                      ↑前端乐观更新            ↑process_repo.py 完成阶段写入
+```
+
+Task 失败时 `repo.status` 保持 `syncing`（与全量流程 `cloning` 失败行为一致），需通过 `DELETE` + 重新提交或 `reprocess` 端点恢复。
