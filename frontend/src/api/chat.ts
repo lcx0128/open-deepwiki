@@ -64,3 +64,88 @@ export function createChatStream(options: ChatStreamOptions): EventSource {
 
   return eventSource
 }
+
+export interface DeepResearchStreamOptions {
+  repoId: string
+  sessionId?: string
+  query: string
+  messages: Array<{ role: string; content: string }>
+  onSessionId: (sessionId: string) => void
+  onToken: (token: string) => void
+  onChunkRefs: (refs: ChunkRef[]) => void
+  onDeepResearchContinue: (iteration: number) => void
+  onDone: () => void
+  onError: (message: string) => void
+}
+
+export function createDeepResearchStream(options: DeepResearchStreamOptions): AbortController {
+  const ac = new AbortController()
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || '/api'
+
+  fetch(`${baseUrl}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      repo_id: options.repoId,
+      session_id: options.sessionId || null,
+      query: options.query,
+      deep_research: true,
+      messages: options.messages,
+    }),
+    signal: ac.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        options.onError(`HTTP ${response.status}: ${response.statusText}`)
+        return
+      }
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const data = JSON.parse(line.slice(6))
+            switch (data.type) {
+              case 'session_id':
+                options.onSessionId(data.session_id)
+                break
+              case 'token':
+                options.onToken(data.content)
+                break
+              case 'chunk_refs':
+                options.onChunkRefs(data.refs || [])
+                break
+              case 'deep_research_continue':
+                options.onDeepResearchContinue(data.iteration)
+                break
+              case 'done':
+                options.onDone()
+                return
+              case 'error':
+                options.onError(data.error || '未知错误')
+                return
+            }
+          } catch {
+            // 忽略非 JSON 数据
+          }
+        }
+      }
+    })
+    .catch((e: Error) => {
+      if (e.name !== 'AbortError') {
+        options.onError(e.message || 'SSE 连接失败')
+      }
+    })
+
+  return ac
+}

@@ -40,16 +40,37 @@ When generating Mermaid diagrams, you MUST follow these rules strictly:
 5. NEVER use special characters (parentheses, quotes) in node labels without quoting
 6. Keep node labels short (max 30 characters)
 7. Maximum 20 nodes per diagram to prevent overflow
+8. Node IDs MUST be ASCII-only (letters, numbers, underscores). Chinese/non-ASCII text MUST only appear inside label brackets [].
+   CORRECT: `A[客户端] --> B[API网关] --> C[服务层]`
+   WRONG:   `客户端 --> API网关 --> 服务层`  (Chinese as node IDs — causes parse errors in Mermaid 10.x)
+   WRONG:   `客户端[Client] --> API网关[Gateway]`  (Chinese in node IDs even with labels)
 """
 
-WIKI_OUTLINE_PROMPT = """You are a technical documentation expert. Analyze this code repository and create a comprehensive wiki structure.
+WIKI_OUTLINE_PROMPT = """You are a technical documentation expert. Analyze this code repository and create a COMPREHENSIVE, DETAILED wiki structure with 6-10 sections.
 
 Repository: {repo_name}
 Languages detected: {languages}
-Key files: {key_files}
+Language statistics: {language_stats}
+
+Key files (by importance):
+{key_files}
+
+File structure:
+{file_tree}
+
+File summaries (classes and functions):
+{file_summaries}
 
 Output language: {language}
 All section titles, page titles, and any text content in the XML MUST be written in {language}. Do not use any other language.
+
+MANDATORY REQUIREMENTS:
+1. You MUST include a section covering System Architecture with an overview page (importance=high) that MUST contain a Mermaid architecture diagram showing all major modules and their relationships.
+2. You MUST include a section covering Module Relationships / Dependencies showing how modules call each other, import relationships, and data flow between components.
+3. You MUST include a section covering Core Data Flow / Execution Pipeline explaining the end-to-end request/processing flow with a Mermaid sequence diagram.
+4. You MUST include a section for each major functional area (e.g., API layer, Service layer, Data layer, Frontend, etc.) based on the actual file structure.
+5. All pages MUST reference specific source files (use relevant_files).
+6. Generate between 6 and 10 sections with 2-6 pages each.
 
 Return your analysis in the following XML format:
 <wiki_structure>
@@ -73,15 +94,20 @@ Return your analysis in the following XML format:
   </pages>
 </wiki_structure>
 
-Generate 3-8 sections with 2-5 pages each. Focus on:
-- Architecture overview (high importance)
-- Core modules and their interactions
-- Data models and database schema
-- API endpoints and usage
-- Configuration and deployment
+Focus on:
+- System Architecture Overview (MANDATORY: Mermaid component/architecture diagram)
+- Module interaction and dependency relationships (MANDATORY: show which modules call which)
+- Core execution pipeline and data flow (MANDATORY: sequence diagram)
+- All major service layers and their responsibilities
+- Data models and database schema (with ERD if applicable)
+- API endpoints, request/response schemas
+- Configuration, environment variables, deployment
+- Frontend components and state management (if applicable)
+- Error handling and resilience patterns
+- Testing strategy
 """
 
-PAGE_CONTENT_PROMPT = """You are writing a detailed technical wiki page.
+PAGE_CONTENT_PROMPT = """You are writing a detailed technical wiki page for a code repository.
 
 Page title: {page_title}
 Section: {section_title}
@@ -96,12 +122,27 @@ Below is the relevant source code from the repository:
 {code_context}
 </code_context>
 
-Write a comprehensive, well-structured Markdown page that:
-1. Explains the purpose and functionality of the code
-2. Includes code snippets where helpful (use proper syntax highlighting)
-3. Includes Mermaid diagrams where appropriate to visualize architecture or flow
-4. References specific file paths and line numbers
-5. Is written in a clear, professional tone
+Write a COMPREHENSIVE, DETAILED Markdown page that:
+
+1. **Code Location Citations (MANDATORY)**: For every function, class, or feature you describe, you MUST cite the exact location: `file_path:start_line-end_line` (e.g., `app/services/wiki_generator.py:110-216`). Never describe a function without citing where it lives.
+
+2. **Architecture/Flow Diagrams (MANDATORY for architecture and flow pages)**: Include at least one Mermaid diagram showing:
+   - For architecture pages: component relationships using `graph TD`
+   - For flow/pipeline pages: sequence diagrams using `sequenceDiagram`
+   - For data model pages: ER diagrams using `erDiagram`
+
+3. **Module Relationship Explanation**: Explain how this module/component interacts with OTHER modules. What does it call? What calls it? What data does it receive and produce?
+
+4. **Implementation Details**: Explain the actual implementation logic, not just "what it does" but "HOW it does it" - algorithms, data structures, key design decisions.
+
+5. **Code Snippets**: Include representative code snippets (with syntax highlighting) for the most important parts. Show actual code, not pseudocode.
+
+6. **Configuration and Parameters**: Document all important configuration options, environment variables, and parameters.
+
+7. **Error Handling**: Describe error handling patterns, fallbacks, and resilience mechanisms.
+
+Structure your response with clear headings (## for main sections, ### for subsections).
+Aim for comprehensive coverage: a reader should understand both WHAT the code does and HOW it does it.
 
 {mermaid_constraints}
 """
@@ -257,7 +298,7 @@ async def _generate_page_content(
 async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
     """
     获取仓库概要信息，用于填充 Wiki 大纲 Prompt。
-    返回: {repo_name, languages, key_files}
+    返回: {repo_name, languages, key_files, file_tree, file_summaries, language_stats}
     """
     # 获取仓库名
     repo = await db.get(Repository, repo_id)
@@ -266,24 +307,78 @@ async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
     # 从 ChromaDB 获取文件路径和语言信息
     languages = set()
     key_files = []
+    file_tree = "(empty)"
+    file_summaries = "(none)"
+    language_stats = "unknown"
 
     try:
-        # 获取少量 chunk 用于提取语言和关键文件信息
-        results = collection.get(limit=200, include=["metadatas"])
+        # 获取更多 chunk 用于提取丰富的仓库信息
+        results = collection.get(limit=500, include=["metadatas"])
         if results and results.get("metadatas"):
             file_counts: Dict[str, int] = {}
+
+            # 构建文件摘要（函数/类清单）
+            file_summary_map: Dict[str, dict] = {}  # file_path -> {language, functions: [], classes: []}
+
             for meta in results["metadatas"]:
                 if meta:
                     lang = meta.get("language", "")
                     if lang:
                         languages.add(lang)
-                    file_path = meta.get("file_path", "")
-                    if file_path:
-                        file_counts[file_path] = file_counts.get(file_path, 0) + 1
+                    fp = meta.get("file_path", "")
+                    if fp:
+                        file_counts[fp] = file_counts.get(fp, 0) + 1
+                        if fp not in file_summary_map:
+                            file_summary_map[fp] = {"language": lang, "functions": [], "classes": []}
+                        name = meta.get("name", "")
+                        node_type = meta.get("node_type", "")
+                        if name and name != "<anonymous>":
+                            if "function" in node_type or "method" in node_type:
+                                if name not in file_summary_map[fp]["functions"]:
+                                    file_summary_map[fp]["functions"].append(name)
+                            elif "class" in node_type:
+                                if name not in file_summary_map[fp]["classes"]:
+                                    file_summary_map[fp]["classes"].append(name)
 
             # 取出现次数最多的前10个文件作为关键文件
             key_files = sorted(file_counts.keys(),
                                key=lambda f: file_counts[f], reverse=True)[:10]
+
+            # 构建文件树字符串（按目录分组）
+            dirs: Dict[str, list] = {}
+            for fp in sorted(file_summary_map.keys())[:50]:
+                parts = fp.replace("\\", "/").split("/")
+                d = "/".join(parts[:-1]) or "(root)"
+                dirs.setdefault(d, []).append(parts[-1])
+            file_tree_lines = []
+            for d, files in sorted(dirs.items())[:20]:
+                file_tree_lines.append(f"  {d}/")
+                for f in files[:10]:
+                    file_tree_lines.append(f"    {f}")
+            file_tree = "\n".join(file_tree_lines) or "(empty)"
+
+            # 构建文件摘要字符串（含函数/类）
+            file_summaries_lines = []
+            for fp, info in list(file_summary_map.items())[:20]:
+                line = f"- {fp}"
+                if info["classes"]:
+                    line += f"  classes: {', '.join(info['classes'][:5])}"
+                if info["functions"]:
+                    line += f"  functions: {', '.join(info['functions'][:8])}"
+                file_summaries_lines.append(line)
+            file_summaries = "\n".join(file_summaries_lines) or "(none)"
+
+            # 语言统计
+            lang_counts: Dict[str, int] = {}
+            for info in file_summary_map.values():
+                l = info["language"]
+                if l:
+                    lang_counts[l] = lang_counts.get(l, 0) + 1
+            language_stats = ", ".join(
+                f"{l}: {c} files"
+                for l, c in sorted(lang_counts.items(), key=lambda x: -x[1])[:10]
+            ) or "unknown"
+
     except Exception as e:
         logger.warning(f"[WikiGenerator] 获取 ChromaDB 摘要失败: {e}")
 
@@ -291,30 +386,34 @@ async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
         "repo_name": repo_name,
         "languages": ", ".join(sorted(languages)) or "unknown",
         "key_files": "\n".join(f"- {f}" for f in key_files) or "- (no files detected)",
+        "file_tree": file_tree,
+        "file_summaries": file_summaries,
+        "language_stats": language_stats,
     }
 
 
 async def _retrieve_code_context(
     collection, relevant_files: List[str], page_title: str,
-    max_chunks: int = 10,
+    max_chunks: int = 20,
 ) -> str:
     """
     检索与页面相关的代码上下文。
     策略：
     1. 按 file_path 过滤（若有 relevant_files）
     2. 语义搜索（用 page_title 做 query）
-    3. 格式化为 code context 字符串
+    3. 多角度语义搜索补充
+    4. 格式化为 code context 字符串
     """
     chunks_data = []
 
     try:
         # 策略 1：按文件路径过滤
         if relevant_files:
-            for file_path in relevant_files[:5]:  # 最多取 5 个文件
+            for file_path in relevant_files[:10]:  # 最多取 10 个文件
                 try:
                     results = collection.get(
                         where={"file_path": {"$eq": file_path}},
-                        limit=3,
+                        limit=5,
                         include=["documents", "metadatas"],
                     )
                     if results and results.get("documents"):
@@ -330,7 +429,7 @@ async def _retrieve_code_context(
                 query_embeddings = await _call_embedding_api([page_title])
                 semantic_results = collection.query(
                     query_embeddings=query_embeddings,
-                    n_results=min(max_chunks - len(chunks_data), 5),
+                    n_results=min(max_chunks - len(chunks_data), 10),
                     include=["documents", "metadatas"],
                 )
                 if semantic_results and semantic_results.get("documents"):
@@ -343,6 +442,32 @@ async def _retrieve_code_context(
                                 chunks_data.append((meta, doc))
             except Exception as e:
                 logger.warning(f"[WikiGenerator] 语义检索失败: {e}")
+
+        # 策略 3：多角度语义搜索（用不同角度的 query 补充）
+        if len(chunks_data) < max_chunks:
+            alt_queries = [
+                f"architecture implementation flow {page_title}",
+                f"module dependency relationship {page_title}",
+            ]
+            for alt_q in alt_queries:
+                if len(chunks_data) >= max_chunks:
+                    break
+                try:
+                    from app.services.embedder import _call_embedding_api
+                    alt_embeddings = await _call_embedding_api([alt_q])
+                    alt_results = collection.query(
+                        query_embeddings=alt_embeddings,
+                        n_results=min(5, max_chunks - len(chunks_data)),
+                        include=["documents", "metadatas"],
+                    )
+                    if alt_results and alt_results.get("documents"):
+                        for doc_list, meta_list in zip(alt_results["documents"], alt_results["metadatas"]):
+                            for doc, meta in zip(doc_list, meta_list):
+                                if not any(c[1] == doc for c in chunks_data):
+                                    chunks_data.append((meta, doc))
+                except Exception:
+                    pass
+
     except Exception as e:
         logger.warning(f"[WikiGenerator] 代码检索失败: {e}")
 
