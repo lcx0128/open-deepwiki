@@ -56,9 +56,9 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env        # 配置环境变量
 alembic upgrade head
-uvicorn backend.main:app --reload --port 8000
-# 另开终端启动 Worker：
-celery -A backend.celery_app worker -l info
+uvicorn app.main:app --reload --port 8000
+# 另开终端启动 Worker（Windows 必须加 --pool=solo）：
+celery -A app.celery_app worker -l info --pool=solo
 ```
 
 **前端：**
@@ -75,9 +75,13 @@ npm run dev
 
 | 变量名 | 说明 |
 |---|---|
-| `LLM_API_KEY` | LLM 提供商的 API Key |
-| `LLM_BASE_URL` | API Base URL（使用 OpenAI 官方接口可留空） |
-| `LLM_MODEL` | 模型名称，如 `gpt-4o`、`qwen-long` |
+| `OPENAI_API_KEY` | OpenAI 或兼容接口的 API Key |
+| `OPENAI_BASE_URL` | API Base URL（DashScope 需要） |
+| `DASHSCOPE_API_KEY` | 阿里云百炼 API Key |
+| `GOOGLE_API_KEY` | Google Gemini API Key |
+| `DEFAULT_LLM_PROVIDER` | 默认 LLM 供应商（openai/dashscope/gemini/custom） |
+| `DEFAULT_LLM_MODEL` | 默认模型名称，如 `gpt-4o`、`qwen-plus` |
+| `WIKI_LANGUAGE` | Wiki 生成语言，默认 `Chinese`，支持任意自然语言名称 |
 | `REDIS_URL` | Redis 连接地址 |
 | `DATABASE_URL` | SQLAlchemy 数据库连接字符串 |
 
@@ -112,8 +116,8 @@ npm run dev
 
 | 版本 | 里程碑 | 状态 |
 |---|---|---|
-| v0.1.0 | 基础设施层 + AST 解析层 | 进行中 |
-| v0.2.0 | LLM 网关层 + 前端层 | 规划中 |
+| v0.1.0 | 基础设施层 + AST 解析层 | ✅ 已完成 |
+| v0.2.0 | LLM 网关层 + Wiki 生成 + 前端层 | ✅ 已完成 |
 | v0.3.0 | RAG 检索层 + MCP Server | 规划中 |
 | v1.0.0 | 正式发布（GA） | 规划中 |
 

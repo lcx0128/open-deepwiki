@@ -51,6 +51,9 @@ dist/
 # ChromaDB 向量数据库本地数据
 chromadb_data/
 chroma_data/
+# 运行时数据目录（SQLite DB、ChromaDB 持久化等），保留 .gitkeep 占位文件
+data/*
+!data/.gitkeep
 # 克隆的代码仓库缓存
 repos/
 # AdalFlow 兼容目录（如有）
