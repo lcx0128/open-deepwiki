@@ -10,10 +10,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import handle_chat, handle_chat_stream, handle_deep_research_stream
+from app.services.conversation_memory import get_history, session_exists
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+@router.get(
+    "/sessions/{session_id}",
+    summary="获取会话历史",
+)
+async def get_session(session_id: str):
+    """
+    获取指定会话的历史消息，用于前端刷新后恢复对话记录。
+
+    返回格式：
+    - session_id: 会话 ID
+    - messages: 消息列表，每条含 role / content / chunk_refs / timestamp
+    """
+    if not await session_exists(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在或已过期")
+    messages = await get_history(session_id)
+    return {"session_id": session_id, "messages": messages}
 
 
 @router.post(

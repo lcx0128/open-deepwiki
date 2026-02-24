@@ -23,7 +23,7 @@ const router = createRouter({
       meta: { title: 'Wiki - Open DeepWiki' },
     },
     {
-      path: '/chat/:repoId',
+      path: '/chat/:repoId/:sessionId?',
       name: 'chat',
       component: () => import('@/views/ChatView.vue'),
       props: true,

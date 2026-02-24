@@ -157,15 +157,15 @@ function resetAndSubmitNew() {
     <div v-if="!hasTask" class="home-form-container">
       <!-- Hero 区域 -->
       <div class="hero">
-        <div class="hero__icon">📚</div>
         <h1 class="hero__title">Open DeepWiki</h1>
+        <p class="hero__badge">AI-powered code knowledge base</p>
         <p class="hero__desc">
           输入任意 Git 仓库地址，AI 自动解析代码，生成结构化知识库文档
         </p>
       </div>
 
       <!-- 提交表单 -->
-      <div class="submit-card card">
+      <div class="submit-card">
         <div class="form-group">
           <label class="form-label">仓库地址 <span class="required">*</span></label>
           <div class="url-input-row">
@@ -197,7 +197,14 @@ function resetAndSubmitNew() {
 
         <!-- 高级选项折叠 -->
         <button class="advanced-toggle" @click="showAdvanced = !showAdvanced">
-          {{ showAdvanced ? '▾' : '▸' }} 高级选项（LLM 配置、私有仓库）
+          <svg
+            class="advanced-toggle__chevron"
+            :class="{ 'advanced-toggle__chevron--open': showAdvanced }"
+            viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"
+          >
+            <path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          高级选项（LLM 配置、私有仓库）
         </button>
 
         <div v-if="showAdvanced" class="advanced-options">
@@ -255,9 +262,18 @@ function resetAndSubmitNew() {
     <div v-else class="task-container">
       <div class="task-header">
         <h2 class="task-title">
-          <span v-if="isCompleted">✅ Wiki 生成完成</span>
-          <span v-else-if="isFailed">❌ 处理失败</span>
-          <span v-else>⚙️ 正在处理仓库...</span>
+          <span v-if="isCompleted" class="task-title__status task-title__status--done">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+            Wiki 生成完成
+          </span>
+          <span v-else-if="isFailed" class="task-title__status task-title__status--failed">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+            处理失败
+          </span>
+          <span v-else class="task-title__status task-title__status--running">
+            <svg class="task-title__spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke-linecap="round"/></svg>
+            正在处理仓库...
+          </span>
         </h2>
         <div class="task-actions">
           <button class="btn btn-secondary btn-sm" @click="resetAndSubmitNew">
@@ -268,7 +284,8 @@ function resetAndSubmitNew() {
             :to="{ name: 'wiki', params: { repoId: taskStore.currentTask.repoId } }"
             class="btn btn-primary"
           >
-            查看 Wiki →
+            查看 Wiki
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-left:4px;vertical-align:-1px"><path d="M3 8h10M9 4l4 4-4 4" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </RouterLink>
         </div>
       </div>
@@ -300,46 +317,62 @@ function resetAndSubmitNew() {
 
 <style scoped>
 .home-view {
-  max-width: 900px;
+  max-width: 860px;
   margin: 0 auto;
-  padding: 40px 20px;
+  padding: 48px 20px 80px;
   width: 100%;
 }
 
+/* ── Hero ─────────────────────────────────────────── */
 .hero {
   text-align: center;
-  margin-bottom: 36px;
-}
-
-.hero__icon {
-  font-size: 52px;
-  margin-bottom: 12px;
+  margin-bottom: 40px;
 }
 
 .hero__title {
-  font-size: 2.5rem;
+  font-size: 2.75rem;
   font-weight: 800;
-  margin-bottom: 12px;
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  margin-bottom: 10px;
+  background: linear-gradient(135deg, #1e40af, #6d28d9);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+}
+
+.hero__badge {
+  display: inline-block;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  padding: 3px 12px;
+  border-radius: var(--radius-full);
+  margin-bottom: 12px;
 }
 
 .hero__desc {
-  font-size: var(--font-size-lg);
+  font-size: 15px;
   color: var(--text-tertiary);
-  max-width: 600px;
+  max-width: 520px;
   margin: 0 auto;
+  line-height: 1.7;
 }
 
+/* ── Submit card ──────────────────────────────────── */
 .submit-card {
-  margin-bottom: 24px;
+  margin-bottom: 28px;
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow);
 }
 
 .url-input-row {
   display: flex;
-  gap: 12px;
+  gap: 10px;
 }
 
 .url-input-row .form-input {
@@ -349,15 +382,30 @@ function resetAndSubmitNew() {
 .required { color: #ef4444; }
 
 .advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: none;
   border: none;
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   cursor: pointer;
   padding: 4px 0;
-  margin-top: 8px;
+  margin-top: 10px;
+  transition: color 0.15s;
 }
 .advanced-toggle:hover { color: var(--text-secondary); }
+
+.advanced-toggle__chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  transition: transform 0.2s;
+}
+
+.advanced-toggle__chevron--open {
+  transform: rotate(180deg);
+}
 
 .advanced-options {
   margin-top: 16px;
@@ -371,37 +419,48 @@ function resetAndSubmitNew() {
   gap: 16px;
 }
 
+/* ── Feature cards ────────────────────────────────── */
 .features {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+  margin-top: 8px;
 }
 
 .feature-card {
-  padding: 20px;
+  padding: 18px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
-  transition: box-shadow 0.2s;
+  transition: all 0.2s;
 }
 
-.feature-card:hover { box-shadow: var(--shadow-md); }
+.feature-card:hover {
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
 
-.feature-icon { font-size: 28px; margin-bottom: 8px; }
+.feature-icon {
+  font-size: 24px;
+  margin-bottom: 10px;
+  line-height: 1;
+}
 
 .feature-card h3 {
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-sm);
   font-weight: 600;
   color: var(--text-primary);
   margin-bottom: 6px;
 }
 
 .feature-card p {
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-xs);
   color: var(--text-tertiary);
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
+/* ── Task container ───────────────────────────────── */
 .task-container {
   max-width: 700px;
   margin: 0 auto;
@@ -422,9 +481,35 @@ function resetAndSubmitNew() {
   color: var(--text-primary);
 }
 
+.task-title__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.task-title__status svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.task-title__status--done { color: #059669; }
+.task-title__status--failed { color: #dc2626; }
+.task-title__status--running { color: var(--text-primary); }
+
+.task-title__spin {
+  animation: spin 1.4s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .task-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
 }
 
 .task-info {
@@ -458,9 +543,10 @@ function resetAndSubmitNew() {
   border-radius: var(--radius-sm);
 }
 
+/* ── Responsive ───────────────────────────────────── */
 @media (max-width: 640px) {
   .url-input-row { flex-direction: column; }
   .form-row { grid-template-columns: 1fr; }
-  .hero__title { font-size: 1.8rem; }
+  .hero__title { font-size: 2rem; }
 }
 </style>

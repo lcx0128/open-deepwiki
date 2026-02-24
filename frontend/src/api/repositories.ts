@@ -82,3 +82,27 @@ export async function getTaskStatus(taskId: string): Promise<TaskStatusResponse>
   const response = await apiClient.get<TaskStatusResponse>(`/tasks/${taskId}`)
   return response.data
 }
+
+export interface FileContentResponse {
+  file_path: string
+  content: string
+  start_line: number
+  total_lines: number
+  language: string
+}
+
+export async function getFileContent(
+  repoId: string,
+  filePath: string,
+  startLine?: number,
+  endLine?: number
+): Promise<FileContentResponse> {
+  const params: Record<string, unknown> = { path: filePath }
+  if (startLine !== undefined) params.start_line = startLine
+  if (endLine !== undefined) params.end_line = endLine
+  const response = await apiClient.get<FileContentResponse>(
+    `/repositories/${repoId}/file`,
+    { params }
+  )
+  return response.data
+}

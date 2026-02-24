@@ -1,6 +1,6 @@
 # API 接口文档
 
-> **版本**: 1.2.0 | **最后更新**: 2026-02-24
+> **版本**: 1.3.0 | **最后更新**: 2026-02-25
 >
 > Base URL: `http://localhost:8000`
 
@@ -501,7 +501,7 @@ Celery 任务内置自动重试：**最多 2 次**，退避间隔 **30s → 60s*
 
 ### GET /api/chat/stream
 
-基于 RAG 的多轮对话端点（SSE 流式）。与 `/api/chat` 功能相同，但以 Server-Sent Events 格式逐条推送生成的 Token 和最终的代码引用列表。
+基于 RAG 的多轮对话端点（SSE 流式）。
 
 **查询参数**:
 
@@ -605,6 +605,54 @@ eventSource.onerror = (err) => {
 
 ---
 
+### GET /api/chat/sessions/{session_id} — 获取会话历史
+
+获取指定会话的历史消息列表，用于前端刷新页面后恢复对话记录。
+
+**路径参数**:
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `session_id` | string | 会话 UUID |
+
+**成功响应 200**:
+
+```json
+{
+    "session_id": "c5d6e7f8-9a0b-1cde-f234-567890abcdef",
+    "messages": [
+        {
+            "id": "m1-uuid",
+            "role": "user",
+            "content": "这个项目的整体架构是什么？",
+            "timestamp": "2026-02-25T10:00:00Z"
+        },
+        {
+            "id": "m2-uuid",
+            "role": "assistant",
+            "content": "项目采用分层架构...",
+            "chunk_refs": [
+                {
+                    "file_path": "app/main.py",
+                    "start_line": 1,
+                    "end_line": 50,
+                    "name": "FastAPI Application"
+                }
+            ],
+            "timestamp": "2026-02-25T10:00:05Z"
+        }
+    ]
+}
+```
+
+**错误响应**:
+
+| HTTP 状态码 | 场景 |
+|-----------|------|
+| 404 | 会话不存在或已过期（超过 24 小时） |
+
+---
+
 ## 会话管理说明
 
 ### 会话存储与生命周期
@@ -623,69 +671,35 @@ eventSource.onerror = (err) => {
 - **Token 限制**：历史上下文总 Token 数不超过 4000，超出时从最早对话开始截断
 - **分离隔离**：不同 `repo_id` 的会话数据完全隔离，无法跨仓库共享
 
-### 客户端集成建议
+### 客户端集成说明（前端实现）
 
-**1. 会话持久化（Vue + Pinia）**:
+前端使用 **URL 路由**管理会话，而非 localStorage，避免 SPA 跨导航串会话的问题。
 
-```javascript
-// 在 Store 中保存 session_id
-defineStore('chat', {
-    state: () => ({
-        sessionId: localStorage.getItem('chatSessionId') || null,
-        repoId: null,
-    }),
-    actions: {
-        setSession(sessionId, repoId) {
-            this.sessionId = sessionId;
-            this.repoId = repoId;
-            localStorage.setItem('chatSessionId', sessionId);
-            localStorage.setItem('chatRepoId', repoId);
-        },
-        clearSession() {
-            this.sessionId = null;
-            this.repoId = null;
-            localStorage.removeItem('chatSessionId');
-            localStorage.removeItem('chatRepoId');
-        }
-    }
-});
+**路由结构**：`/chat/:repoId/:sessionId?`
+
+**1. 新对话入口（从 Wiki 页面发起）**
+
+```
+WikiView → /chat/{repoId}?q={query}&dr=1
 ```
 
-**2. 切换仓库时清除旧会话**:
-
-```javascript
-function onRepositoryChange(newRepoId) {
-    if (store.repoId !== newRepoId) {
-        store.clearSession();  // 不同仓库需新建会话
-    }
-}
+ChatView `onMounted` 检测到 `?q=` 时，**强制清空** Pinia store 并创建新会话。
+首条 SSE 事件 `session_id` 返回后，执行 `router.replace` 将 URL 改为：
 ```
-
-**3. 监测会话过期**:
-
-```javascript
-async function sendMessage(query) {
-    try {
-        const response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                repo_id: store.repoId,
-                session_id: store.sessionId,
-                query: query,
-            }),
-        });
-
-        if (response.status === 404 && response.error === 'SESSION_EXPIRED') {
-            store.clearSession();  // 清除过期会话，重新开始
-            return sendMessage(query);  // 递归重试
-        }
-
-        const data = await response.json();
-        store.setSession(data.session_id, store.repoId);  // 更新 session_id
-        return data;
-    } catch (error) {
-        console.error('Chat error', error);
-    }
-}
+/chat/{repoId}/{sessionId}
 ```
+（`replace` 不产生浏览器历史条目，返回键仍回到 WikiView）
+
+**2. 刷新恢复**
+
+URL 已包含 `sessionId` → 调用 `GET /api/chat/sessions/{sessionId}` → 历史消息填入 Pinia → 继续对话。
+会话过期（404）时自动回退到空白聊天页。
+
+**3. 切换仓库**
+
+不同 `repoId` 的路由天然隔离，无需手动清空会话状态。
+
+**4. Deep Research 完成后**
+
+5 轮结束后前端自动将 `deepResearch` 切换为 `false`，后续对话变为普通模式。同一会话内不能再次发起 Deep Research（需新开对话）。
+

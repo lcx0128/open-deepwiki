@@ -1,4 +1,5 @@
 from typing import Optional
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -273,3 +274,73 @@ async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
                 logger.info(f"[RepoAPI] 本地克隆目录已删除: {local_path}")
             except Exception as e:
                 logger.warning(f"[RepoAPI] 删除本地目录失败（已忽略）: {e}")
+
+
+EXT_LANG = {
+    '.py': 'python', '.ts': 'typescript', '.tsx': 'tsx',
+    '.js': 'javascript', '.jsx': 'jsx', '.vue': 'vue',
+    '.go': 'go', '.rs': 'rust', '.java': 'java',
+    '.cpp': 'cpp', '.c': 'c', '.cs': 'csharp',
+    '.rb': 'ruby', '.php': 'php', '.swift': 'swift',
+    '.kt': 'kotlin', '.md': 'markdown', '.json': 'json',
+    '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml',
+    '.sh': 'bash', '.html': 'html', '.css': 'css',
+    '.sql': 'sql', '.xml': 'xml',
+}
+
+
+@router.get(
+    "/{repo_id}/file",
+    summary="读取仓库内文件内容",
+)
+async def read_repository_file(
+    repo_id: str,
+    path: str = Query(..., description="相对于仓库根目录的文件路径，如 src/main.py"),
+    start_line: Optional[int] = Query(None, ge=1, description="起始行（1-indexed，含）"),
+    end_line: Optional[int] = Query(None, ge=1, description="结束行（1-indexed，含）"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    读取已克隆仓库中指定文件的内容，支持按行范围切片。
+    防止路径穿越攻击：文件路径必须位于仓库根目录内。
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo or not repo.local_path:
+        raise HTTPException(status_code=404, detail="仓库不存在或尚未克隆")
+
+    repo_root = Path(repo.local_path).resolve()
+    target = (repo_root / path).resolve()
+
+    # 防止路径穿越
+    try:
+        target.relative_to(repo_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="禁止访问仓库目录之外的路径")
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
+
+    try:
+        content = target.read_text(encoding='utf-8', errors='replace')
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"读取文件失败: {e}")
+
+    lines = content.splitlines(keepends=True)
+    total_lines = len(lines)
+
+    actual_start = start_line if start_line is not None else 1
+    if end_line is not None:
+        sliced = lines[actual_start - 1:end_line]
+    else:
+        sliced = lines[actual_start - 1:]
+
+    sliced_content = ''.join(sliced)
+    language = EXT_LANG.get(target.suffix.lower(), 'text')
+
+    return {
+        "file_path": path,
+        "content": sliced_content,
+        "start_line": actual_start,
+        "total_lines": total_lines,
+        "language": language,
+    }

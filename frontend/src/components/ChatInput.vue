@@ -135,7 +135,7 @@ function toggleDeepResearch() {
 .chat-input {
   display: flex;
   gap: 10px;
-  align-items: flex-end;
+  align-items: center;
   padding: 8px 16px 12px;
 }
 
@@ -168,6 +168,9 @@ function toggleDeepResearch() {
   flex-shrink: 0;
   height: 40px;
   min-width: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .btn-deep-research {
