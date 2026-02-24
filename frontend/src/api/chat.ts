@@ -8,6 +8,21 @@ export interface ChunkRef {
   name: string
 }
 
+export interface SessionMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  chunk_refs?: ChunkRef[]
+  timestamp: string
+}
+
+export async function getChatSession(sessionId: string): Promise<{ session_id: string; messages: SessionMessage[] }> {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || '/api'
+  const response = await fetch(`${baseUrl}/chat/sessions/${sessionId}`)
+  if (!response.ok) throw new Error(`Session not found: ${response.status}`)
+  return response.json()
+}
+
 export interface ChatStreamOptions {
   repoId: string
   sessionId?: string

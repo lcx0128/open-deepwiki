@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
-import { createChatStream, createDeepResearchStream } from '@/api/chat'
+import { createChatStream, createDeepResearchStream, getChatSession } from '@/api/chat'
 import { getFileContent } from '@/api/repositories'
 import type { ChunkRef } from '@/stores/chat'
 import ChatBubble from '@/components/ChatBubble.vue'
 import ChatInput from '@/components/ChatInput.vue'
 import hljs from 'highlight.js'
 
-const props = defineProps<{ repoId: string }>()
+const props = defineProps<{ repoId: string; sessionId?: string }>()
 const route = useRoute()
+const router = useRouter()
 const chatStore = useChatStore()
 const messagesRef = ref<HTMLElement | null>(null)
 
@@ -63,6 +64,40 @@ function scrollToBottom() {
   })
 }
 
+// 恢复已有会话的历史消息（刷新恢复场景）
+async function loadSession(sessionId: string) {
+  try {
+    const data = await getChatSession(sessionId)
+    chatStore.clearChat()
+    chatStore.sessionId = sessionId
+    for (const msg of data.messages) {
+      chatStore.addMessage({
+        id: crypto.randomUUID(),
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content,
+        timestamp: Date.now(),
+        chunkRefs: msg.chunk_refs || [],
+      })
+    }
+    scrollToBottom()
+  } catch {
+    // 会话已过期或不存在，回退到空白聊天
+    chatStore.clearChat()
+    router.replace({ name: 'chat', params: { repoId: props.repoId } })
+  }
+}
+
+// 会话创建后将 sessionId 写入 URL（replace，不产生历史条目）
+function pushSessionToUrl(sid: string) {
+  if (!props.sessionId) {
+    router.replace({
+      name: 'chat',
+      params: { repoId: props.repoId, sessionId: sid },
+      query: {},
+    })
+  }
+}
+
 async function handleSend(query: string) {
   if (chatStore.isLoading) return
   chatStore.addMessage({
@@ -95,7 +130,7 @@ async function startNormalChat(query: string) {
     repoId: props.repoId,
     sessionId: chatStore.sessionId || undefined,
     query,
-    onSessionId: (sid) => { chatStore.sessionId = sid },
+    onSessionId: (sid) => { chatStore.sessionId = sid; pushSessionToUrl(sid) },
     onToken: (token) => { chatStore.appendToLastAssistant(token); scrollToBottom() },
     onChunkRefs: (refs) => { chatStore.setLastAssistantRefs(refs) },
     onDone: () => { chatStore.finishStreaming(); activeEventSource = null },
@@ -139,7 +174,7 @@ async function startDeepResearch(query: string, originalQuery: string) {
     sessionId: chatStore.sessionId || undefined,
     query: originalQuery,
     messages: messagesForApi,
-    onSessionId: (sid) => { chatStore.sessionId = sid },
+    onSessionId: (sid) => { chatStore.sessionId = sid; pushSessionToUrl(sid) },
     onToken: (token) => {
       if (isFinalRound) {
         chatStore.appendToLastAssistant(token)
@@ -177,6 +212,7 @@ async function startDeepResearch(query: string, originalQuery: string) {
         drIteration.value = 0
         drQuery.value = ''
         drError.value = null
+        deepResearch.value = false  // DR 完成后自动切换为普通对话模式
       }
     },
     onError: (message) => {
@@ -285,13 +321,26 @@ function highlightCode(code: string, lang: string): string {
 }
 
 onMounted(async () => {
-  if (route.query.dr === '1') {
-    deepResearch.value = true
-  }
   const q = route.query.q as string | undefined
-  if (q && q.trim()) {
-    await nextTick()
-    handleSend(q.trim())
+  const dr = route.query.dr === '1'
+
+  if (props.sessionId && !q) {
+    // 有 sessionId 且没有 ?q= → 恢复已有会话
+    await loadSession(props.sessionId)
+    // 恢复时读取 DR 标记（虽然 DR 后会被重置，这里仅防御性处理）
+    if (dr) deepResearch.value = true
+  } else {
+    // ?q= 入口或空白新会话 → 始终清空状态，防止 Pinia 跨导航串会话
+    chatStore.clearChat()
+    drHistory.value = []
+    drError.value = null
+    drActive.value = false
+    drIteration.value = 0
+    if (dr) deepResearch.value = true
+    if (q?.trim()) {
+      await nextTick()
+      handleSend(q.trim())
+    }
   }
 })
 
