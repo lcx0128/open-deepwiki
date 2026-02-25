@@ -113,3 +113,7 @@ coverage/
 CLAUDE.md
 doc/dev-context/
 .omc/
+
+# --- MCP & Claude Code local config (contains personal paths, never commit) ---
+.mcp.json
+.claude/
