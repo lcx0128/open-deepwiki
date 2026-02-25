@@ -12,6 +12,7 @@
 - [第二步：启动 MCP 服务](#第二步启动-mcp-服务)
 - [第三步：接入 Claude Code](#第三步接入-claude-code)
 - [第四步：配置 DeepWiki Skill](#第四步配置-deepwiki-skill)
+- [Docker 云端部署接入](#docker-云端部署接入)
 - [可选：HTTP 模式（远程接入）](#可选http-模式远程接入)
 - [工具列表速查](#工具列表速查)
 - [常见问题](#常见问题)
@@ -249,6 +250,90 @@ mkdir -p .claude/skills
 ```
 
 > `.claude/` 目录包含本地工作流配置，已加入 `.gitignore`，**请勿提交到版本库**。
+
+---
+
+## Docker 云端部署接入
+
+通过 `docker compose up -d` 启动后，MCP 服务器自动以 **HTTP 模式**运行在 `8808` 端口，无需手动管理进程。
+
+### 架构示意
+
+```
+本地 Claude Code ──HTTP──▶ 服务器:8808 ──▶ deepwiki-mcp 容器
+                                               │
+                                    ┌──────────┴──────────┐
+                              SQLite (共享卷)   ChromaDB (共享卷)
+```
+
+### 配置鉴权 Token
+
+在服务器的 `.env` 中设置：
+
+```bash
+MCP_AUTH_TOKEN=your-secure-random-token
+```
+
+重启 MCP 服务使其生效：
+
+```bash
+docker compose restart mcp
+```
+
+> 不设置 `MCP_AUTH_TOKEN` 时，MCP 服务无鉴权（仅适合内网/防火墙保护环境）。
+
+### 本地 Claude Code 接入远程 MCP
+
+在**本地机器**的项目根目录创建 `.mcp.json`，将 `your-server` 替换为服务器 IP 或域名：
+
+```json
+{
+  "mcpServers": {
+    "open-deepwiki": {
+      "url": "http://your-server:8808/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secure-random-token"
+      }
+    }
+  }
+}
+```
+
+> **注意**：不设置 `MCP_AUTH_TOKEN` 时，省略 `headers` 字段即可。
+
+保存后完全退出并重启 Claude Code，然后验证：
+
+```
+用 list_repositories 列出所有仓库
+```
+
+### 验证 MCP 服务可访问（curl）
+
+```bash
+curl -X POST http://your-server:8808/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-secure-random-token" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "list_repositories",
+      "arguments": {}
+    },
+    "id": 1
+  }'
+```
+
+返回仓库列表说明 MCP 服务正常。
+
+### 防火墙配置
+
+| 端口 | 服务 | 说明 |
+|------|------|------|
+| `80` | frontend | 对外开放，用户访问 Web UI |
+| `8808` | mcp | 对外开放，供远程 AI 工具接入 |
+| `8000` | api | **仅内部**，不对外暴露（由 nginx 代理） |
+| `6379` | redis | **仅内部**，不对外暴露 |
 
 ---
 
