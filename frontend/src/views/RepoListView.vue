@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { getRepositories, deleteRepository, reprocessRepository } from '@/api/repositories'
+import { getRepositories, deleteRepository, reprocessRepository, syncRepository } from '@/api/repositories'
 import { useRepoStore } from '@/stores/repo'
 import { useTaskStore } from '@/stores/task'
 import { useEventSource } from '@/composables/useEventSource'
@@ -16,6 +16,11 @@ const { connectSSE } = useEventSource()
 const filterStatus = ref('')
 const deleteTarget = ref<RepositoryItem | null>(null)
 const actionLoading = ref<string | null>(null) // repoId
+const syncTarget = ref<RepositoryItem | null>(null)  // 待增量更新的仓库
+const showSyncModal = ref(false)
+const syncLlmProvider = ref('')
+const syncLlmModel = ref('')
+const showSyncAdvanced = ref(false)
 
 const filteredRepos = computed(() => {
   if (!filterStatus.value) return repoStore.repos
@@ -73,6 +78,56 @@ async function handleReprocess(repo: RepositoryItem) {
     repoStore.error = '重新处理失败'
   } finally {
     actionLoading.value = null
+  }
+}
+
+async function handleSync(repo: RepositoryItem) {
+  syncTarget.value = repo
+  showSyncModal.value = true
+  syncLlmProvider.value = ''
+  syncLlmModel.value = ''
+  showSyncAdvanced.value = false
+}
+
+async function confirmSync() {
+  if (!syncTarget.value) return
+  const repo = syncTarget.value
+  showSyncModal.value = false
+  actionLoading.value = repo.id
+
+  try {
+    const result = await syncRepository(repo.id, {
+      llm_provider: syncLlmProvider.value || undefined,
+      llm_model: syncLlmModel.value || undefined,
+    })
+    taskStore.setTask({
+      id: result.task_id,
+      repoId: repo.id,
+      type: 'incremental_sync',
+      status: 'pending',
+      progressPct: 0,
+      currentStage: '增量同步已开始...',
+      filesTotal: 0,
+      filesProcessed: 0,
+      errorMsg: null,
+      wikiId: null,
+    })
+    connectSSE(result.task_id)
+    repoStore.updateRepoStatus(repo.id, 'syncing')
+    router.push({ path: '/', query: { taskId: result.task_id } })
+  } catch (err: unknown) {
+    const e = err as { response?: { status?: number; data?: { detail?: unknown } } }
+    if (e.response?.status === 409) {
+      repoStore.error = '该仓库正在处理中，请稍后再试'
+    } else if (e.response?.status === 400) {
+      const d = e.response.data?.detail
+      repoStore.error = (typeof d === 'string' ? d : null) || '增量同步失败'
+    } else {
+      repoStore.error = '增量同步失败，请检查后端服务'
+    }
+  } finally {
+    actionLoading.value = null
+    syncTarget.value = null
   }
 }
 
@@ -209,6 +264,14 @@ onMounted(loadRepos)
             AI 问答
           </RouterLink>
           <button
+            v-if="repo.status === 'ready'"
+            class="btn btn-secondary btn-sm"
+            :disabled="actionLoading === repo.id"
+            @click="handleSync(repo)"
+          >
+            增量更新
+          </button>
+          <button
             class="btn btn-secondary btn-sm"
             :disabled="actionLoading === repo.id || ['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing'].includes(repo.status)"
             @click="handleReprocess(repo)"
@@ -237,6 +300,59 @@ onMounted(loadRepos)
         <div class="modal-actions">
           <button class="btn btn-secondary" @click="deleteTarget = null">取消</button>
           <button class="btn btn-danger" @click="handleDelete">确认删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 增量同步弹窗 -->
+    <div v-if="showSyncModal" class="modal-overlay" @click.self="showSyncModal = false">
+      <div class="modal card">
+        <h3>增量更新仓库</h3>
+        <p>
+          将对仓库 <strong>{{ syncTarget?.name }}</strong> 执行增量同步：
+          拉取最新代码、仅重新处理变更文件并重新生成 Wiki。
+          <br><br>
+          <strong>同步期间将暂时无法查看 Wiki。</strong>
+        </p>
+
+        <!-- LLM 高级选项 -->
+        <button class="advanced-toggle" @click="showSyncAdvanced = !showSyncAdvanced">
+          <svg
+            class="advanced-toggle__chevron"
+            :class="{ 'advanced-toggle__chevron--open': showSyncAdvanced }"
+            viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"
+          >
+            <path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          LLM 配置（可选）
+        </button>
+
+        <div v-if="showSyncAdvanced" class="sync-advanced">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">LLM 供应商</label>
+              <select v-model="syncLlmProvider" class="form-input form-select">
+                <option value="">默认（环境变量配置）</option>
+                <option value="openai">OpenAI</option>
+                <option value="dashscope">DashScope（阿里云）</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="custom">自定义</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">模型名称</label>
+              <input
+                v-model="syncLlmModel"
+                class="form-input"
+                placeholder="如 gpt-4o / qwen-plus"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showSyncModal = false">取消</button>
+          <button class="btn btn-primary" @click="confirmSync">开始增量更新</button>
         </div>
       </div>
     </div>
@@ -481,4 +597,65 @@ onMounted(loadRepos)
   .repo-grid { grid-template-columns: 1fr; }
   .page-header { flex-direction: column; gap: 16px; }
 }
+
+/* ── Sync modal advanced options ──────────────────── */
+.advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  padding: 4px 0;
+  margin-top: 10px;
+  transition: color 0.15s;
+}
+.advanced-toggle:hover { color: var(--text-secondary); }
+
+.advanced-toggle__chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  transition: transform 0.2s;
+}
+.advanced-toggle__chevron--open { transform: rotate(180deg); }
+
+.sync-advanced {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-label {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.form-input {
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.form-input:focus { border-color: var(--color-primary); }
+.form-select { cursor: pointer; }
 </style>

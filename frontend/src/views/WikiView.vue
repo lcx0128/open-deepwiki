@@ -118,6 +118,56 @@ function handleChatSubmit() {
   router.push({ name: 'chat', params: { repoId: props.repoId }, query })
 }
 
+function handleExportMarkdown() {
+  const wiki = wikiStore.wiki
+  if (!wiki) return
+
+  const lines: string[] = []
+
+  // Wiki 标题
+  lines.push(`# ${wiki.title}`)
+  lines.push('')
+
+  // 按 section -> page 顺序组织内容
+  for (const section of wiki.sections) {
+    lines.push(`## ${section.title}`)
+    lines.push('')
+
+    for (const page of section.pages) {
+      lines.push(`### ${page.title}`)
+      lines.push('')
+
+      // 相关文件列表
+      if (page.relevant_files && page.relevant_files.length > 0) {
+        lines.push('**相关文件：**')
+        for (const file of page.relevant_files) {
+          lines.push(`- \`${file}\``)
+        }
+        lines.push('')
+      }
+
+      // 页面内容
+      if (page.content_md) {
+        lines.push(page.content_md)
+        lines.push('')
+      }
+    }
+  }
+
+  const content = lines.join('\n')
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  // 处理文件名中的特殊字符
+  const filename = wiki.title.replace(/[<>:"/\\|?*]/g, '_') + '.md'
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 function handleChatKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -205,6 +255,19 @@ watch(() => wikiStore.activePageId, () => {
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
               </svg>
               <span>重新生成</span>
+            </button>
+            <button
+              class="toolbar-btn"
+              @click="handleExportMarkdown"
+              :disabled="!wikiStore.wiki"
+              title="导出为 Markdown"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              <span>导出 MD</span>
             </button>
             <div class="toolbar-divider" />
             <button class="toolbar-btn toolbar-btn--danger" @click="showDeleteConfirm = true" title="删除 Wiki">

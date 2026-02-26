@@ -91,6 +91,17 @@ export interface FileContentResponse {
   language: string
 }
 
+export async function syncRepository(
+  repoId: string,
+  data?: { llm_provider?: string; llm_model?: string }
+): Promise<SubmitRepoResponse> {
+  const response = await apiClient.post<SubmitRepoResponse>(
+    `/repositories/${repoId}/sync`,
+    data || {}
+  )
+  return response.data
+}
+
 export async function getFileContent(
   repoId: string,
   filePath: string,

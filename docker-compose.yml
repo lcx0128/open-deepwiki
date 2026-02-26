@@ -1,12 +1,30 @@
 version: "3.9"
 
+# ============================================================
+# Open-DeepWiki — Docker Compose 云端私有化部署
+#
+# 服务说明：
+#   redis    — 任务队列与会话缓存（内部服务，不对外暴露）
+#   api      — FastAPI 后端（内部服务，通过 nginx 代理）
+#   worker   — Celery 异步任务处理器
+#   mcp      — MCP HTTP 服务器（供远程 Claude Code 等 AI 工具接入）
+#   frontend — Vue3 前端 + nginx（对外暴露 80 端口）
+#
+# 启动前准备：
+#   1. cp .env.example .env  && 填写 API Key 等配置
+#   2. mkdir -p data/chromadb repos
+#   3. docker compose up -d
+# ============================================================
+
 services:
+
+  # ----------------------------------------------------------
+  # Redis — 任务队列 & 会话缓存
+  # ----------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: deepwiki-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -16,20 +34,24 @@ services:
       timeout: 5s
       retries: 5
 
+  # ----------------------------------------------------------
+  # API — FastAPI 后端
+  # 启动时自动执行 alembic upgrade head
+  # ----------------------------------------------------------
   api:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
     container_name: deepwiki-api
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./repos:/app/repos
     environment:
       - DATABASE_URL=sqlite+aiosqlite:///./data/deepwiki.db
       - REDIS_URL=redis://redis:6379/0
+      - CHROMADB_PATH=./data/chromadb
+      - REPOS_BASE_DIR=./repos
     env_file:
       - .env
     depends_on:
@@ -40,7 +62,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 20s
 
+  # ----------------------------------------------------------
+  # Worker — Celery 异步任务（仓库处理 / Wiki 生成）
+  # Linux 容器下使用默认 prefork pool，无需 --pool=solo
+  # ----------------------------------------------------------
   worker:
     build:
       context: .
@@ -53,12 +80,57 @@ services:
     environment:
       - DATABASE_URL=sqlite+aiosqlite:///./data/deepwiki.db
       - REDIS_URL=redis://redis:6379/0
+      - CHROMADB_PATH=./data/chromadb
+      - REPOS_BASE_DIR=./repos
     env_file:
       - .env
     depends_on:
       redis:
         condition: service_healthy
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+      api:
+        condition: service_healthy
+
+  # ----------------------------------------------------------
+  # MCP — Model Context Protocol HTTP 服务器
+  # 云端部署时默认以 HTTP 模式运行，供远程 AI 工具（Claude Code
+  # Gemini CLI 等）通过网络直接查询代码库知识。
+  # 鉴权：在 .env 中设置 MCP_AUTH_TOKEN（留空则无鉴权）
+  # ----------------------------------------------------------
+  mcp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mcp
+    container_name: deepwiki-mcp
+    restart: unless-stopped
+    ports:
+      - "8808:8808"
+    volumes:
+      - ./data:/app/data
+      - ./repos:/app/repos
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/deepwiki.db
+      - CHROMADB_PATH=./data/chromadb
+      - REPOS_BASE_DIR=./repos
+    env_file:
+      - .env
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # ----------------------------------------------------------
+  # Frontend — Vue3 静态构建 + nginx 反向代理
+  # 对外暴露 80 端口，/api/ 请求自动代理到 api 容器
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: deepwiki-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
 
 volumes:
   redis_data:

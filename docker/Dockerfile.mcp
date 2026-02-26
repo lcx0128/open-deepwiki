@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 安装系统依赖
+# 安装系统依赖（git 用于克隆仓库后 read_file 访问）
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -17,13 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制应用代码
 COPY app/ ./app/
-COPY migrations/ ./migrations/
-COPY alembic.ini .
 
 # 创建数据目录（卷挂载时宿主机目录优先）
 RUN mkdir -p data/chromadb repos
 
-EXPOSE 8000
+EXPOSE 8808
 
-# 启动时先执行数据库迁移，再启动 API 服务
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# 云端部署：默认以 HTTP 模式启动，通过 MCP_AUTH_TOKEN 环境变量控制鉴权
+CMD ["python", "-m", "app.mcp_server", "--transport", "http", "--host", "0.0.0.0", "--port", "8808"]

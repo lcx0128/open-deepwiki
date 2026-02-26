@@ -115,45 +115,95 @@ async def _run_task(
                                    **({"wiki_id": wiki_id} if wiki_id else {}))
                     return
 
-                # ===== 阶段 1: 克隆仓库 =====
-                await _update_task(db, task_id, TaskStatus.CLONING, 5, "正在克隆仓库...")
-                await _publish(task_id, "cloning", 5, "正在克隆仓库...")
+                # ===== 阶段 1: 克隆/同步仓库 =====
+                task_record_stage1 = await db.get(Task, task_id)
+                is_incremental = (task_record_stage1 is not None and task_record_stage1.type == TaskType.INCREMENTAL_SYNC)
 
-                local_path = f"{settings.REPOS_BASE_DIR}/{repo_id}"
-                # clone_repository 内部使用 subprocess，通过 to_thread 避免阻塞事件循环
-                success, clone_error = await asyncio.to_thread(
-                    clone_repository, repo_url, local_path, pat_token, branch
-                )
-                # PAT Token 在 clone_repository 内已销毁
+                if is_incremental:
+                    await _update_task(db, task_id, TaskStatus.CLONING, 5, "正在同步仓库最新代码...")
+                    await _publish(task_id, "cloning", 5, "正在同步仓库最新代码...")
 
-                if not success:
-                    err_detail = f"仓库克隆失败: {clone_error}" if clone_error else "仓库克隆失败"
-                    await _fail_task(db, task_id, err_detail, stage="cloning")
-                    await _publish(task_id, "failed", 0, err_detail)
-                    return
+                    # 从 Repository 获取本地路径和分支
+                    repo_check = await db.get(Repository, repo_id)
+                    local_path = repo_check.local_path if repo_check else f"{settings.REPOS_BASE_DIR}/{repo_id}"
+                    sync_branch = branch or (repo_check.default_branch if repo_check else "main") or "main"
+                    repo = repo_check
 
-                # 更新 Repository 记录（仅更新本地路径，状态将在全流程完成后更新为 READY）
-                repo = await db.get(Repository, repo_id)
-                if repo:
-                    repo.local_path = local_path
-                await db.flush()
+                    # 执行 git fetch + diff + merge + 清理 ChromaDB 已删除文件
+                    try:
+                        from app.tasks.incremental_sync import apply_incremental_sync
+                        from app.services.embedder import get_collection
+                        collection = get_collection(repo_id)
+                        sync_stats = await apply_incremental_sync(
+                            db, repo_id, local_path, collection, branch=sync_branch
+                        )
+                        stats_msg = (
+                            f"同步完成：新增 {sync_stats['added']} / "
+                            f"修改 {sync_stats['modified']} / "
+                            f"删除 {sync_stats['deleted']} 个文件"
+                        )
+                        await _publish(task_id, "cloning", 15, stats_msg,
+                                       sync_stats=sync_stats)
+                    except Exception as e:
+                        logger.warning(f"[Task] 增量同步 git 操作失败，继续处理: {e}")
+                        local_path = f"{settings.REPOS_BASE_DIR}/{repo_id}"
 
-                # 获取当前 HEAD commit hash（用于增量同步）
-                import subprocess
-                head_commit_hash = ""
-                try:
-                    result = await asyncio.to_thread(
-                        subprocess.run,
-                        ["git", "rev-parse", "HEAD"],
-                        cwd=local_path,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
+                    # 获取当前 HEAD commit hash
+                    import subprocess
+                    head_commit_hash = ""
+                    try:
+                        result = await asyncio.to_thread(
+                            subprocess.run,
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=local_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        if result.returncode == 0:
+                            head_commit_hash = result.stdout.strip()
+                    except Exception as e:
+                        logger.warning(f"无法获取 HEAD commit hash: {e}")
+
+                else:
+                    await _update_task(db, task_id, TaskStatus.CLONING, 5, "正在克隆仓库...")
+                    await _publish(task_id, "cloning", 5, "正在克隆仓库...")
+
+                    local_path = f"{settings.REPOS_BASE_DIR}/{repo_id}"
+                    # clone_repository 内部使用 subprocess，通过 to_thread 避免阻塞事件循环
+                    success, clone_error = await asyncio.to_thread(
+                        clone_repository, repo_url, local_path, pat_token, branch
                     )
-                    if result.returncode == 0:
-                        head_commit_hash = result.stdout.strip()
-                except Exception as e:
-                    logger.warning(f"无法获取 HEAD commit hash: {e}")
+                    # PAT Token 在 clone_repository 内已销毁
+
+                    if not success:
+                        err_detail = f"仓库克隆失败: {clone_error}" if clone_error else "仓库克隆失败"
+                        await _fail_task(db, task_id, err_detail, stage="cloning")
+                        await _publish(task_id, "failed", 0, err_detail)
+                        return
+
+                    # 更新 Repository 记录（仅更新本地路径，状态将在全流程完成后更新为 READY）
+                    repo = await db.get(Repository, repo_id)
+                    if repo:
+                        repo.local_path = local_path
+                    await db.flush()
+
+                    # 获取当前 HEAD commit hash（用于增量同步）
+                    import subprocess
+                    head_commit_hash = ""
+                    try:
+                        result = await asyncio.to_thread(
+                            subprocess.run,
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=local_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        if result.returncode == 0:
+                            head_commit_hash = result.stdout.strip()
+                    except Exception as e:
+                        logger.warning(f"无法获取 HEAD commit hash: {e}")
 
                 # ===== 阶段 2: AST 解析 =====
                 _stage = "parsing"

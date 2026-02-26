@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "open-deepwiki": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server", "--transport", "stdio"],
+      "cwd": "/path/to/open-deepwiki",
+      "env": {
+        "PYTHONPATH": "/path/to/open-deepwiki"
+      }
+    }
+  }
+}

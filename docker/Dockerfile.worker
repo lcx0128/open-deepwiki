@@ -1,8 +1,11 @@
 FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
 
-# 安装系统依赖（包含 git 用于克隆仓库）
+# 安装系统依赖（git 用于克隆仓库）
 RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
@@ -15,7 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY alembic.ini .
 
-# 创建必要目录
+# 创建数据目录（卷挂载时宿主机目录优先）
 RUN mkdir -p data/chromadb repos
 
+# Linux 容器下无需 --pool=solo，默认 prefork 即可
 CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
