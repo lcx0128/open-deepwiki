@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# 安装系统依赖
+# 安装系统依赖（已替换为阿里云镜像源，加速国内下载）
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's|http://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 Python 依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+
+# 复制应用代码
+COPY app/ ./app/
+COPY migrations/ ./migrations/
+COPY alembic.ini .
+
+# 创建数据目录（卷挂载时宿主机目录优先）
+RUN mkdir -p data/chromadb repos
+
+EXPOSE 8000
+
+# 启动时先执行数据库迁移，再启动 API 服务
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
