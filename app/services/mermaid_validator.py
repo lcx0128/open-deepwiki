@@ -1,6 +1,6 @@
 import re
 import logging
-from typing import List
+from typing import List, Tuple
 from app.services.llm.adapter import BaseLLMAdapter
 from app.schemas.llm import LLMMessage
 
@@ -8,6 +8,124 @@ logger = logging.getLogger(__name__)
 
 # Mermaid 代码块正则
 MERMAID_BLOCK_RE = re.compile(r'```mermaid\s*\n(.*?)\n\s*```', re.DOTALL)
+
+# Few-shot 修复示例，按错误类型索引
+_FIX_EXAMPLES: dict[str, str] = {
+    "中文节点": """\
+## Example: Chinese text used as node IDs
+
+WRONG (causes "Syntax error" in Mermaid 10.x):
+graph TD
+    客户端 --> API网关 --> 服务层
+    API网关 --> 数据库层
+
+CORRECT (ASCII node IDs, Chinese only inside [ ] labels):
+graph TD
+    A[客户端] --> B[API网关] --> C[服务层]
+    B --> D[数据库层]
+
+WRONG:
+graph TD
+    用户请求[用户请求] --> 路由层[路由层]
+
+CORRECT:
+graph TD
+    UserReq[用户请求] --> Router[路由层]
+
+Rule: Node IDs must be ASCII letters/numbers/underscores. Chinese text must only appear inside square brackets [ ].
+""",
+
+    "graph LR": """\
+## Example: graph LR is forbidden
+
+WRONG:
+graph LR
+    A[开始] --> B[处理] --> C[结束]
+
+CORRECT:
+graph TD
+    A[开始] --> B[处理] --> C[结束]
+
+Rule: Always use `graph TD` (top-down). Never use `graph LR`.
+""",
+
+    "括号": """\
+## Example: Unmatched brackets
+
+WRONG:
+graph TD
+    A[客户端 --> B[API网关]
+    B --> C[服务层]
+
+CORRECT:
+graph TD
+    A[客户端] --> B[API网关]
+    B --> C[服务层]
+
+WRONG:
+graph TD
+    A(处理节点 --> B[结果]
+
+CORRECT:
+graph TD
+    A(处理节点) --> B[结果]
+
+Rule: Every opening bracket [ or ( must have a matching closing bracket ] or ).
+""",
+
+    "标签过长": """\
+## Example: Node labels too long (max 30 characters)
+
+WRONG:
+graph TD
+    A[这是一个描述非常详细超过三十个字符的服务组件名称] --> B[目标]
+
+CORRECT:
+graph TD
+    A[详细服务组件] --> B[目标]
+
+Rule: Keep node labels under 30 characters. Abbreviate long names.
+""",
+}
+
+
+def _build_fix_messages(block: str, errors: List[str]) -> Tuple[str, str]:
+    """
+    根据检测到的错误类型，构建包含针对性 few-shot 示例的修复提示。
+    返回 (system_content, user_content)。
+    """
+    system_content = (
+        "You are a Mermaid diagram syntax expert. "
+        "Your only job is to return corrected Mermaid code. "
+        "Follow the examples exactly. "
+        "Output ONLY the raw Mermaid code — no explanation, no ```mermaid wrapper."
+    )
+
+    # 按检测到的错误类型选择相关示例
+    error_text = " ".join(errors)
+    selected: List[str] = []
+    if "中文" in error_text or "节点ID" in error_text:
+        selected.append(_FIX_EXAMPLES["中文节点"])
+    if "graph LR" in error_text:
+        selected.append(_FIX_EXAMPLES["graph LR"])
+    if "括号" in error_text:
+        selected.append(_FIX_EXAMPLES["括号"])
+    if "过长" in error_text:
+        selected.append(_FIX_EXAMPLES["标签过长"])
+
+    examples_section = ("\n".join(selected) + "\n---\n\n") if selected else ""
+
+    error_list = "\n".join(f"  - {e}" for e in errors)
+    user_content = (
+        f"{examples_section}"
+        f"Fix the following Mermaid diagram.\n\n"
+        f"Errors detected:\n{error_list}\n\n"
+        f"Broken diagram:\n"
+        f"```mermaid\n{block}\n```\n\n"
+        "Return ONLY the corrected Mermaid code (no wrapper, no explanation)."
+    )
+
+    return system_content, user_content
 
 # 常见语法错误检测规则
 MERMAID_RULES = [
@@ -93,20 +211,18 @@ async def validate_and_fix_mermaid(
                 continue
 
             all_valid = False
-            logger.warning(f"[MermaidValidator] 发现 {len(errors)} 个错误，第 {attempt + 1} 次修复")
-            fix_prompt = (
-                f"The following Mermaid diagram has syntax errors:\n\n"
-                f"```mermaid\n{block}\n```\n\n"
-                f"Errors found:\n"
-                + "\n".join(f"- {e}" for e in errors)
-                + "\n\nPlease fix ALL errors and return ONLY the corrected Mermaid code "
-                  "(without ```mermaid wrapper).\n"
-                  "Remember: use graph TD (not LR), proper arrow syntax, and short node labels."
+            logger.warning(
+                f"[MermaidValidator] 发现 {len(errors)} 个错误，第 {attempt + 1} 次修复: "
+                + "; ".join(errors)
             )
+            system_content, user_content = _build_fix_messages(block, errors)
 
             try:
                 fix_response = await adapter.generate_with_rate_limit(
-                    messages=[LLMMessage(role="user", content=fix_prompt)],
+                    messages=[
+                        LLMMessage(role="system", content=system_content),
+                        LLMMessage(role="user", content=user_content),
+                    ],
                     model=model,
                     temperature=0.1,
                 )

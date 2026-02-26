@@ -44,10 +44,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(
-    "open-deepwiki",
-    description="Open-DeepWiki 代码库知识图谱 MCP 服务器 — 语义搜索、代码检索、Wiki 文档访问",
-)
+mcp = FastMCP("open-deepwiki")
 
 
 # ---------------------------------------------------------------------------
