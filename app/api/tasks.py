@@ -56,6 +56,25 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
         await pubsub.subscribe(channel)
 
         try:
+            # 订阅之后再读一次 DB，避免订阅前任务已完成导致错过终态事件
+            from app.database import async_session_factory
+            from app.models.task import Task as TaskModel
+            async with async_session_factory() as fresh_db:
+                fresh_task = await fresh_db.get(TaskModel, task_id)
+            if fresh_task and fresh_task.status in (
+                TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED
+            ):
+                stage = "已完成" if fresh_task.status == TaskStatus.COMPLETED else (
+                    fresh_task.error_msg or "已取消"
+                )
+                payload = {
+                    "status": fresh_task.status.value,
+                    "progress_pct": fresh_task.progress_pct,
+                    "stage": stage,
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                return
+
             # 发送当前状态作为初始事件
             initial = {
                 "status": task.status.value,

@@ -85,15 +85,18 @@ async def submit_repository(
         await db.flush()
         task_type = TaskType.FULL_PROCESS
 
-    # 3. 创建 Task 记录
+    # 3. 创建 Task 记录，先提交确保 Celery worker 能通过 task_id 查到记录
     task = Task(repo_id=repo.id, type=task_type)
     db.add(task)
     await db.flush()
+    task_id = task.id  # 在 commit 前保存，expire_on_commit=False 下对象保持有效
+    await db.commit()
 
     # 4. 发送 Celery 任务（PAT Token 仅作为参数传递，不持久化）
+    # 必须在 commit 之后调用，避免 Celery worker 在事务提交前读取 DB 导致 task 为 None
     from app.tasks.process_repo import process_repository_task
     celery_result = process_repository_task.delay(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo.id,
         repo_url=request.url,
         pat_token=request.pat_token,
@@ -218,10 +221,12 @@ async def reprocess_repository(
     db.add(task)
     repo.status = RepoStatus.CLONING
     await db.flush()
+    task_id = task.id
+    await db.commit()
 
     from app.tasks.process_repo import process_repository_task
     celery_result = process_repository_task.delay(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         repo_url=repo.url,
         llm_provider=request.llm_provider,
@@ -231,7 +236,7 @@ async def reprocess_repository(
     await db.commit()
 
     return RepositoryCreateResponse(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         status="pending",
         message="全量重新处理任务已提交",
@@ -285,10 +290,12 @@ async def sync_repository(
     db.add(task)
     repo.status = RepoStatus.SYNCING
     await db.flush()
+    task_id = task.id
+    await db.commit()
 
     from app.tasks.process_repo import process_repository_task
     celery_result = process_repository_task.delay(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         repo_url=repo.url,
         llm_provider=request.llm_provider,
@@ -298,7 +305,7 @@ async def sync_repository(
     await db.commit()
 
     return RepositoryCreateResponse(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         status="pending",
         message="增量同步任务已提交",
@@ -335,7 +342,10 @@ async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
         if task.celery_task_id:
             try:
                 from app.celery_app import celery_app
-                celery_app.control.revoke(task.celery_task_id, terminate=True)
+                # terminate=False：仅将任务标记为已撤销，worker 拾取时自动丢弃。
+                # 不使用 terminate=True，因为 --pool=solo 无子进程，
+                # terminate 会对 worker 主进程发送 SIGTERM，导致 worker 崩溃。
+                celery_app.control.revoke(task.celery_task_id, terminate=False)
             except Exception:
                 pass  # broker 不可达时忽略，DB 级联删除仍会清理记录
 
