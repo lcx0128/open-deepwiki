@@ -15,102 +15,141 @@ from app.services.embedder import get_collection
 from app.schemas.llm import LLMMessage
 from app.models.wiki import Wiki, WikiSection, WikiPage
 from app.models.repository import Repository
-from app.services.mermaid_validator import validate_and_fix_mermaid
+from app.services.mermaid_validator import (
+    validate_and_fix_mermaid,
+    process_diagram_specs,
+    retry_failed_diagram_specs,
+)
 from app.services.token_degradation import is_token_overflow, generate_with_degradation
 
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# Mermaid 约束 System Prompt
+# 图表生成 System Prompt（JSON spec 格式）
 # ============================================================
 MERMAID_CONSTRAINT_PROMPT = """
-=== CRITICAL MERMAID SYNTAX RULES — MUST FOLLOW ALL OR DIAGRAM WILL BREAK ===
+╔══════════════════════════════════════════════════════════════════╗
+║  DIAGRAM OUTPUT FORMAT — STRICT REQUIREMENT                      ║
+║                                                                  ║
+║  ✗ FORBIDDEN: ```mermaid  (raw Mermaid will cause syntax errors) ║
+║  ✓ REQUIRED:  ```diagram-spec  (JSON → assembled by Python)      ║
+╚══════════════════════════════════════════════════════════════════╝
 
-━━━ RULE 1: FLOW DIAGRAMS — ALWAYS `flowchart TD`, NEVER `graph LR` / `graph TD` ━━━
-WRONG:   graph LR
-         A["Start"] --> B["End"]
-WRONG:   graph TD
-         A["Start"] --> B["End"]
-CORRECT: flowchart TD
-         A["Start"] --> B["End"]
-         subgraph Layer["层级"]
-             C["服务"]
-         end
+NEVER output a ```mermaid code block. It will break.
+ALWAYS output diagrams as ```diagram-spec JSON. The assembler handles:
+  - ASCII node IDs (auto-sanitized)
+  - Chinese label quoting in erDiagram (auto-added)
+  - Node label length limits (auto-truncated)
+  - flowchart direction (enforced)
+You do NOT need to worry about any Mermaid syntax rules — just write valid JSON.
 
-━━━ RULE 2: NODE IDs MUST BE ASCII-ONLY (CRITICAL for Mermaid 10.x) ━━━
-Node IDs (before [ ]) MUST be ASCII letters, numbers, or underscores only.
-Chinese/non-ASCII text MUST ONLY appear INSIDE double-quoted label brackets.
+━━━ FLOWCHART (架构图 / 模块关系图) ━━━
+```diagram-spec
+{
+  "type": "flowchart",
+  "direction": "TD",
+  "nodes": [
+    {"id": "Client",  "label": "客户端",        "shape": "rect"},
+    {"id": "API",     "label": "API网关",        "shape": "rect"},
+    {"id": "Worker",  "label": "Celery Worker", "shape": "stadium"},
+    {"id": "DB",      "label": "PostgreSQL",    "shape": "subroutine"},
+    {"id": "Cache",   "label": "Redis",         "shape": "subroutine"}
+  ],
+  "edges": [
+    {"from_id": "Client", "to_id": "API",    "label": "HTTP请求"},
+    {"from_id": "API",    "to_id": "Worker", "label": "发布任务"},
+    {"from_id": "Worker", "to_id": "DB",     "label": "状态更新"},
+    {"from_id": "Worker", "to_id": "Cache",  "label": "缓存写入"}
+  ],
+  "subgraphs": [
+    {"id": "backend", "label": "后端服务", "node_ids": ["API", "Worker"]}
+  ]
+}
+```
 
-WRONG (causes "Syntax error in text"):
-    客户端 --> API网关 --> 服务层
-    客户端[Client] --> API网关[Gateway]
+━━━ ER DIAGRAM (数据模型图) ━━━
+```diagram-spec
+{
+  "type": "erDiagram",
+  "entities": [
+    {
+      "name": "Repository",
+      "attributes": [
+        {"type": "string", "name": "id",     "key": "PK"},
+        {"type": "string", "name": "url"},
+        {"type": "string", "name": "status"}
+      ]
+    },
+    {
+      "name": "Task",
+      "attributes": [
+        {"type": "string", "name": "id",      "key": "PK"},
+        {"type": "string", "name": "repo_id", "key": "FK"},
+        {"type": "string", "name": "type"}
+      ]
+    }
+  ],
+  "relationships": [
+    {"from_entity": "Repository", "to_entity": "Task", "cardinality": "||--o{", "label": "包含"}
+  ]
+}
+```
 
-CORRECT:
-    A["客户端"] --> B["API网关"] --> C["服务层"]
-    Client["客户端"] --> Gateway["API网关"]
+━━━ SEQUENCE DIAGRAM (时序图 / 调用流程) ━━━
+```diagram-spec
+{
+  "type": "sequenceDiagram",
+  "participants": [
+    {"alias": "Client", "name": "客户端"},
+    {"alias": "API",    "name": "FastAPI"},
+    {"alias": "DB",     "name": "数据库"}
+  ],
+  "messages": [
+    {"from_alias": "Client", "to_alias": "API", "message": "POST /api/tasks", "arrow": "->>"},
+    {"from_alias": "API",    "to_alias": "DB",  "message": "INSERT Task",     "arrow": "->>"},
+    {"from_alias": "DB",     "to_alias": "API", "message": "task_id",         "arrow": "-->>"},
+    {"from_alias": "API",    "to_alias": "Client", "message": "202 Accepted", "arrow": "-->>"}
+  ]
+}
+```
 
-━━━ RULE 3: ALL NODE LABELS MUST USE DOUBLE QUOTES (CRITICAL) ━━━
-Every node label MUST be wrapped in double quotes to prevent special-character parse errors.
-NEVER put double quotes inside the label text itself.
+━━━ FIELD REFERENCE ━━━
+flowchart shape (ONLY these values):
+  "rect"       - rectangle (default, for services/APIs)
+  "round"      - rounded rectangle (for processes)
+  "diamond"    - decision node
+  "stadium"    - pill shape (for workers/queues)
+  "subroutine" - double-border rectangle (for databases/storage)
+  FORBIDDEN shapes: "db", "database", "cylinder", "circle" — use "subroutine" or "round" instead
 
-WRONG:   A[客户端] --> B[API网关]
-WRONG:   A[Function(args)] --> B[key:value]
-CORRECT: A["客户端"] --> B["API网关"]
-CORRECT: A["Function args"] --> B["key value"]
+sequenceDiagram arrow (ONLY these values):
+  "->>"  - solid arrow (request/call)
+  "-->>" - dashed arrow (response/async)
+  "->"   - thin solid arrow
+  "-->"  - thin dashed arrow
+  FORBIDDEN arrows: "<--", "<<--", "<-", "<<-"
 
-━━━ RULE 4: erDiagram — CHINESE LABELS MUST USE DOUBLE QUOTES ━━━
-In erDiagram, relationship labels after the colon that contain Chinese MUST be in double quotes.
+sequenceDiagram activate/deactivate:
+  AVOID using activate/deactivate unless you are certain about the pairing.
+  Plain arrows (no activate/deactivate) always render correctly.
+  If you must use them: activate:true on the REQUEST message (activates receiver),
+  deactivate:true on the RESPONSE message FROM the activated participant back to caller.
 
-WRONG (causes 'Expecting ALPHANUM got 中'):
-    Project ||--o{ Wiki : 拥有
-CORRECT:
-    Project ||--o{ Wiki : "拥有"
-    User ||--o{ Task : "创建"
+erDiagram key (ONLY these values or omit):
+  "PK" - primary key
+  "FK" - foreign key
+  "UK" - unique key
+  FORBIDDEN: "", "Unique", "primary", "foreign" — use "PK"/"FK"/"UK" or omit the key field
 
-━━━ RULE 5: SEQUENCE DIAGRAMS ━━━
-    - First line: sequenceDiagram (on its own line)
-    - ALWAYS declare participants first with aliases:
-        participant A as 客户端
-        participant B as API网关
-    - Sync call:   A->>B: message
-    - Async return: B-->>A: response
-    - Activation:  A->>+B: request  then  B-->>-A: response
-    - Note:        Note over A,B: message text
+erDiagram cardinality examples: "||--||", "||--o{", "}o--o{", "||--|{"
 
-━━━ RULE 6: NO HTML TAGS INSIDE NODES ━━━
-WRONG:   A["<b>Title</b>"] or A["<br/>line"]
-CORRECT: A["Title"]
-
-━━━ RULE 7: KEEP NODE LABELS SHORT — MAX 30 CHARACTERS ━━━
-WRONG:   A["这是一个描述非常详细超过三十个字符的服务组件名称"]
-CORRECT: A["详细服务组件"]
-
-━━━ RULE 8: MAXIMUM 20 NODES PER DIAGRAM ━━━
-Split large diagrams into multiple smaller focused ones.
-
-━━━ RULE 9: NO UNMATCHED BRACKETS ━━━
-Every [ must have ], every ( must have ).
-WRONG:   A["客户端 --> B["API"]
-CORRECT: A["客户端"] --> B["API"]
-
-━━━ RULE 10: NO SEMICOLONS AS LINE SEPARATORS ━━━
-Each statement must be on its own line.
-WRONG:   A --> B; B --> C
-CORRECT:
-    A --> B
-    B --> C
-
-=== PRE-GENERATION CHECKLIST (verify before outputting each diagram) ===
-□ Using flowchart TD (not graph TD, not graph LR)?
-□ All node IDs are ASCII-only? (no Chinese as node IDs)
-□ All node labels wrapped in double quotes?
-□ All erDiagram Chinese relationship labels wrapped in double quotes?
-□ All brackets matched?
-□ All node labels under 30 characters?
-□ Fewer than 20 nodes total?
-□ No HTML tags inside node labels?
-□ Sequence diagrams declare participants first?
-□ All subgraphs closed with `end`?
+━━━ STRICT RULES ━━━
+1. ALWAYS use ```diagram-spec JSON — NEVER write raw ```mermaid blocks.
+2. messages array: ONLY objects with "from_alias" and "to_alias" fields.
+   NEVER put loop/alt/else/note constructs inside the messages array.
+3. Node/participant IDs: ASCII letters, numbers, underscores ONLY.
+4. Node labels: max 30 characters.
+5. Max 15 nodes per flowchart diagram.
 """
 
 WIKI_OUTLINE_PROMPT = """You are a technical documentation expert. Analyze this code repository and create a COMPREHENSIVE, DETAILED wiki structure with 6-10 sections.
@@ -193,10 +232,10 @@ Write a COMPREHENSIVE, DETAILED Markdown page that:
 
 1. **Code Location Citations (MANDATORY)**: For every function, class, or feature you describe, you MUST cite the exact location: `file_path:start_line-end_line` (e.g., `app/services/wiki_generator.py:110-216`). Never describe a function without citing where it lives.
 
-2. **Architecture/Flow Diagrams (MANDATORY for architecture and flow pages)**: Include at least one Mermaid diagram showing:
-   - For architecture pages: component relationships using `graph TD`
-   - For flow/pipeline pages: sequence diagrams using `sequenceDiagram`
-   - For data model pages: ER diagrams using `erDiagram`
+2. **Architecture/Flow Diagrams (MANDATORY for architecture and flow pages)**: Include at least one diagram using the ```diagram-spec JSON format (see system prompt):
+   - For architecture pages: `"type": "flowchart"` showing component relationships
+   - For flow/pipeline pages: `"type": "sequenceDiagram"` showing call sequence
+   - For data model pages: `"type": "erDiagram"` showing entity relationships
 
 3. **Module Relationship Explanation**: Explain how this module/component interacts with OTHER modules. What does it call? What calls it? What data does it receive and produce?
 
@@ -362,7 +401,12 @@ async def _generate_page_content(
         else:
             raise
 
-    # Mermaid 校验与自愈
+    # 阶段1：将 diagram-spec JSON 块程序化组装为合法 Mermaid（零重试）
+    content = process_diagram_specs(content)
+    # 阶段1.5：对残留的 diagram-spec 块（JSON 解析失败）进行专注重试
+    # 只重新生成图表，不重新生成页面文字内容（用户优化：更小上下文 → 更低幻觉率）
+    content = await retry_failed_diagram_specs(content, adapter, model)
+    # 阶段2：对残留的原始 mermaid 块做正则校验+LLM自愈兜底
     content = await validate_and_fix_mermaid(adapter, model, content)
     return content
 

@@ -65,6 +65,9 @@ wikicache/
 *.sqlite3
 !migrations/
 
+# --- 本地调试脚本 ---
+demo_diagram.py
+
 # --- IDE ---
 .idea/
 .vscode/settings.json
