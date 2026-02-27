@@ -5,7 +5,7 @@ export interface TaskState {
   id: string
   repoId: string
   type: string
-  status: 'pending' | 'cloning' | 'parsing' | 'embedding' | 'generating' | 'completed' | 'failed' | 'cancelled'
+  status: 'pending' | 'cloning' | 'parsing' | 'embedding' | 'generating' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
   progressPct: number
   currentStage: string
   filesTotal: number
@@ -20,12 +20,12 @@ export const useTaskStore = defineStore('task', () => {
 
   const isProcessing = computed(() =>
     currentTask.value !== null &&
-    !['completed', 'failed', 'cancelled'].includes(currentTask.value.status)
+    !['completed', 'failed', 'cancelled', 'interrupted'].includes(currentTask.value.status)
   )
 
   const isTerminal = computed(() =>
     currentTask.value !== null &&
-    ['completed', 'failed', 'cancelled'].includes(currentTask.value.status)
+    ['completed', 'failed', 'cancelled', 'interrupted'].includes(currentTask.value.status)
   )
 
   function setTask(task: TaskState) {

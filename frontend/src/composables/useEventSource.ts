@@ -53,7 +53,7 @@ export function useEventSource() {
         } else if (data.status === 'failed') {
           closeSSE()
           taskStore.updateProgress({ errorMsg: data.stage || '处理失败' })
-        } else if (data.status === 'cancelled') {
+        } else if (data.status === 'cancelled' || data.status === 'interrupted') {
           closeSSE()
         }
       } catch {

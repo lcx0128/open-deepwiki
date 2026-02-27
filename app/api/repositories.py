@@ -50,7 +50,7 @@ async def submit_repository(
     existing_repo = existing_result.scalar_one_or_none()
 
     if existing_repo:
-        # 检查是否有进行中的任务
+        # 检查是否有进行中的任务（INTERRUPTED 视为终态，允许重新提交）
         active_task_result = await db.execute(
             select(Task).where(
                 Task.repo_id == existing_repo.id,
@@ -58,6 +58,7 @@ async def submit_repository(
                     TaskStatus.COMPLETED,
                     TaskStatus.FAILED,
                     TaskStatus.CANCELLED,
+                    TaskStatus.INTERRUPTED,
                 ])
             )
         )
@@ -199,11 +200,11 @@ async def reprocess_repository(
     if not repo:
         raise HTTPException(status_code=404, detail="仓库不存在")
 
-    # 检查是否有进行中的任务
+    # 检查是否有进行中的任务（INTERRUPTED 视为终态，允许重新处理）
     active_result = await db.execute(
         select(Task).where(
             Task.repo_id == repo_id,
-            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]),
         )
     )
     active_task = active_result.scalars().first()
@@ -268,11 +269,11 @@ async def sync_repository(
             detail="仓库尚未克隆，请先提交完整处理任务",
         )
 
-    # 检查是否有进行中的任务
+    # 检查是否有进行中的任务（INTERRUPTED 视为终态，允许重新同步）
     active_result = await db.execute(
         select(Task).where(
             Task.repo_id == repo_id,
-            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]),
         )
     )
     active_task = active_result.scalars().first()
@@ -312,6 +313,55 @@ async def sync_repository(
     )
 
 
+@router.post(
+    "/{repo_id}/abort",
+    status_code=status.HTTP_200_OK,
+    summary="中止仓库当前所有生成任务",
+)
+async def abort_repository_tasks(repo_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    中止指定仓库的所有活跃任务，将任务状态设为 INTERRUPTED，仓库状态设为 INTERRUPTED。
+    中止后可通过「重新处理」恢复。
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+
+    active_result = await db.execute(
+        select(Task).where(
+            Task.repo_id == repo_id,
+            ~Task.status.in_([
+                TaskStatus.COMPLETED, TaskStatus.FAILED,
+                TaskStatus.CANCELLED, TaskStatus.INTERRUPTED,
+            ]),
+        )
+    )
+    active_tasks = active_result.scalars().all()
+
+    if not active_tasks:
+        return {"message": "该仓库当前没有活跃任务", "repo_id": repo_id}
+
+    from app.core.redis_client import set_cancel_flag
+    for task in active_tasks:
+        try:
+            await set_cancel_flag(task.id)
+        except Exception:
+            pass
+        if task.celery_task_id:
+            try:
+                from app.celery_app import celery_app
+                celery_app.control.revoke(task.celery_task_id, terminate=True, signal="SIGTERM")
+            except Exception:
+                pass
+        task.status = TaskStatus.INTERRUPTED
+        task.error_msg = "用户手动中止任务"
+
+    repo.status = RepoStatus.INTERRUPTED
+    await db.commit()
+
+    return {"message": f"已中止 {len(active_tasks)} 个任务", "repo_id": repo_id}
+
+
 @router.delete(
     "/{repo_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -336,7 +386,7 @@ async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
     active_result = await db.execute(
         select(Task).where(
             Task.repo_id == repo_id,
-            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]),
         )
     )
     active_tasks = active_result.scalars().all()
@@ -351,7 +401,8 @@ async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
             if task.celery_task_id:
                 try:
                     from app.celery_app import celery_app
-                    celery_app.control.revoke(task.celery_task_id, terminate=False)
+                    # terminate=True + signal=SIGTERM 确保任务从队列中真正撤销
+                    celery_app.control.revoke(task.celery_task_id, terminate=True, signal="SIGTERM")
                 except Exception:
                     pass
         # 尝试将 DB 状态设为 CANCELLED（可能因 worker 持有写锁而失败，Redis 标志已足够）

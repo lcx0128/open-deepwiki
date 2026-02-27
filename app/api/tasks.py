@@ -35,9 +35,9 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=404, detail="任务不存在")
 
     # 如果任务已是终态，直接返回最终状态
-    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED):
         async def final_event():
-            stage = "已完成" if task.status == TaskStatus.COMPLETED else (task.error_msg or "已取消")
+            stage = "已完成" if task.status == TaskStatus.COMPLETED else (task.error_msg or "已取消/已中断")
             payload = {
                 "status": task.status.value,
                 "progress_pct": task.progress_pct,
@@ -62,7 +62,7 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
             async with async_session_factory() as fresh_db:
                 fresh_task = await fresh_db.get(TaskModel, task_id)
             if fresh_task and fresh_task.status in (
-                TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED
+                TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED
             ):
                 stage = "已完成" if fresh_task.status == TaskStatus.COMPLETED else (
                     fresh_task.error_msg or "已取消"
@@ -100,7 +100,7 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
                     # 检查是否为终态消息
                     try:
                         parsed = json.loads(data)
-                        if parsed.get("status") in ("completed", "failed", "cancelled"):
+                        if parsed.get("status") in ("completed", "failed", "cancelled", "interrupted"):
                             break
                     except json.JSONDecodeError:
                         pass
@@ -121,7 +121,7 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
                                 }
                                 yield f"data: {json.dumps(poll_payload, ensure_ascii=False)}\n\n"
                                 if polled.status in (
-                                    TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED
+                                    TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED
                                 ):
                                     break
                         except Exception:

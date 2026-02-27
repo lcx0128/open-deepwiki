@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-type StatusType = 'pending' | 'cloning' | 'parsing' | 'embedding' | 'generating' | 'completed' | 'ready' | 'error' | 'failed' | 'syncing' | 'cancelled'
+type StatusType = 'pending' | 'cloning' | 'parsing' | 'embedding' | 'generating' | 'completed' | 'ready' | 'error' | 'failed' | 'syncing' | 'cancelled' | 'interrupted'
 
 const props = defineProps<{
   status: StatusType
@@ -20,6 +20,7 @@ const config: Record<StatusType, { label: string; color: string; bg: string; dot
   failed: { label: '失败', color: '#991b1b', bg: '#fee2e2' },
   syncing: { label: '同步中', color: '#0e7490', bg: '#cffafe', dot: true },
   cancelled: { label: '已取消', color: '#6b7280', bg: '#f3f4f6' },
+  interrupted: { label: '已中断', color: '#92400e', bg: '#fef3c7' },
 }
 
 const c = computed(() => config[props.status] || config.pending)

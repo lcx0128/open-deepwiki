@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { getRepositories, deleteRepository, reprocessRepository, syncRepository } from '@/api/repositories'
+import { getRepositories, deleteRepository, reprocessRepository, syncRepository, abortRepository } from '@/api/repositories'
 import { regenerateWiki } from '@/api/wiki'
 import { useRepoStore } from '@/stores/repo'
 import { useTaskStore } from '@/stores/task'
@@ -16,6 +16,7 @@ const { connectSSE } = useEventSource()
 
 const filterStatus = ref('')
 const deleteTarget = ref<RepositoryItem | null>(null)
+const abortTarget = ref<RepositoryItem | null>(null)
 const actionLoading = ref<string | null>(null) // repoId
 const syncTarget = ref<RepositoryItem | null>(null)  // 待增量更新的仓库
 const showSyncModal = ref(false)
@@ -51,6 +52,21 @@ async function handleDelete() {
     repoStore.removeRepo(repoId)
   } catch {
     repoStore.error = '删除失败'
+  } finally {
+    actionLoading.value = null
+  }
+}
+
+async function handleAbort() {
+  if (!abortTarget.value) return
+  const repo = abortTarget.value
+  abortTarget.value = null
+  actionLoading.value = repo.id
+  try {
+    await abortRepository(repo.id)
+    repoStore.updateRepoStatus(repo.id, 'interrupted')
+  } catch {
+    repoStore.error = '中止失败，请稍后重试'
   } finally {
     actionLoading.value = null
   }
@@ -312,6 +328,25 @@ onMounted(loadRepos)
           >
             增量更新
           </button>
+          <!-- 中止按钮：任务进行中时显示 -->
+          <button
+            v-if="['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing'].includes(repo.status)"
+            class="btn btn-ghost btn-sm btn-warning-ghost"
+            :disabled="actionLoading === repo.id"
+            @click="abortTarget = repo"
+          >
+            中止
+          </button>
+          <!-- 重新处理：已中断或失败时显示 -->
+          <button
+            v-if="repo.status === 'interrupted' || (repo.status === 'error' && repo.failed_at_stage === 'generating')"
+            class="btn btn-primary btn-sm"
+            :disabled="actionLoading === repo.id"
+            @click="handleReprocess(repo)"
+          >
+            <span v-if="actionLoading === repo.id">处理中...</span>
+            <span v-else>重新处理</span>
+          </button>
           <button
             v-if="repo.status === 'error' && repo.failed_at_stage === 'generating'"
             class="btn btn-secondary btn-sm"
@@ -319,9 +354,9 @@ onMounted(loadRepos)
             @click="handleRegenerate(repo)"
           >重新生成 Wiki</button>
           <button
-            v-if="!(repo.status === 'error' && repo.failed_at_stage)"
+            v-if="!['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing', 'interrupted'].includes(repo.status) && !(repo.status === 'error' && repo.failed_at_stage === 'generating')"
             class="btn btn-secondary btn-sm"
-            :disabled="actionLoading === repo.id || ['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing'].includes(repo.status)"
+            :disabled="actionLoading === repo.id"
             @click="handleReprocess(repo)"
           >
             <span v-if="actionLoading === repo.id">处理中...</span>
@@ -334,6 +369,21 @@ onMounted(loadRepos)
           >
             删除
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 中止确认弹窗 -->
+    <div v-if="abortTarget" class="modal-overlay" @click.self="abortTarget = null">
+      <div class="modal card">
+        <h3>确认中止任务</h3>
+        <p>
+          将中止仓库 <strong>{{ abortTarget.name }}</strong> 当前所有生成任务。<br><br>
+          中止后可点击「重新处理」恢复。
+        </p>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="abortTarget = null">取消</button>
+          <button class="btn btn-warning" @click="handleAbort">确认中止</button>
         </div>
       </div>
     </div>
@@ -606,6 +656,23 @@ onMounted(loadRepos)
 .btn-danger-ghost:hover:not(:disabled) {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.btn-warning-ghost {
+  color: #d97706;
+}
+.btn-warning-ghost:hover:not(:disabled) {
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.btn-warning {
+  background: #f59e0b;
+  color: white;
+  border: none;
+}
+.btn-warning:hover:not(:disabled) {
+  background: #d97706;
 }
 
 .failed-stage-hint {

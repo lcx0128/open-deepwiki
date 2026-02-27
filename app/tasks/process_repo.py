@@ -74,6 +74,30 @@ async def _run_task(
 
     logger.info(f"[Task] 开始执行: task_id={task_id} repo_id={repo_id} url={repo_url} branch={branch}")
 
+    # ===== 入口合法性校验：防止幽灵任务（已删除仓库/已中断任务自动续传）=====
+    try:
+        async with async_session_factory() as _db:
+            _task_check = await _db.get(Task, task_id)
+            if _task_check is None:
+                logger.warning(
+                    f"[Task] task_id={task_id} 在数据库中不存在（仓库可能已被删除），任务终止"
+                )
+                return
+            if _task_check.status == TaskStatus.INTERRUPTED:
+                logger.warning(
+                    f"[Task] task_id={task_id} 状态为 INTERRUPTED，拒绝自动续传，任务终止"
+                )
+                return
+            _repo_check = await _db.get(Repository, repo_id)
+            if _repo_check is None:
+                logger.warning(
+                    f"[Task] repo_id={repo_id} 在数据库中不存在（仓库可能已被删除），任务终止"
+                )
+                return
+    except Exception as _e:
+        logger.error(f"[Task] 入口校验异常，任务终止: {_e}", exc_info=True)
+        return
+
     # init_redis 单独保护：失败时尝试将 DB 状态标记为 FAILED
     try:
         await init_redis()
@@ -346,7 +370,7 @@ async def _reset_task_for_retry(task_id: str):
     from app.models.task import Task, TaskStatus
     async with async_session_factory() as db:
         task = await db.get(Task, task_id)
-        if task:
+        if task and task.status not in (TaskStatus.INTERRUPTED, TaskStatus.CANCELLED):
             task.status = TaskStatus.PENDING
             task.error_msg = None
             task.failed_at_stage = None
@@ -358,9 +382,9 @@ async def _update_task(db, task_id: str, status, progress: float, stage: str):
     from app.models.task import Task, TaskStatus
     task = await db.get(Task, task_id)
     if task:
-        # 检查是否已被外部取消（DELETE 端点会先将状态设为 CANCELLED）
-        if task.status == TaskStatus.CANCELLED:
-            raise TaskCancelledException(f"任务 {task_id} 已被取消，停止处理")
+        # 检查是否已被外部取消或中止（DELETE/abort 端点会先将状态设为 CANCELLED/INTERRUPTED）
+        if task.status in (TaskStatus.CANCELLED, TaskStatus.INTERRUPTED):
+            raise TaskCancelledException(f"任务 {task_id} 已被取消/中止，停止处理")
         task.status = status
         task.progress_pct = progress
         task.current_stage = stage

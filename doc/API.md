@@ -188,6 +188,26 @@ Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SS
 
 ---
 
+### POST /api/repositories/{repo_id}/abort — 中止任务
+
+中止指定仓库的所有活跃任务，将任务状态设为 `interrupted`，仓库状态设为 `interrupted`。中止后可通过「重新处理」恢复。
+
+**成功响应 200**:
+```json
+{
+    "message": "已中止 1 个任务",
+    "repo_id": "uuid"
+}
+```
+
+**错误响应**:
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 仓库不存在 |
+| 409 | 该仓库当前没有活跃任务 |
+
+---
+
 ### DELETE /api/repositories/{repo_id} — 删除仓库
 
 删除指定仓库及其全部关联数据，适用于任意阶段卡死或需要完整重建的场景。

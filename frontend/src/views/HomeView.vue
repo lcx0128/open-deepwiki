@@ -80,7 +80,7 @@ onMounted(async () => {
         history.replaceState(null, '', `${window.location.pathname}?taskId=${existingTaskId}`)
       }
       // 若任务仍在进行中，重连 SSE
-      if (!['completed', 'failed', 'cancelled'].includes(task.status)) {
+      if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status)) {
         connectSSE(existingTaskId)
       }
     } catch {
