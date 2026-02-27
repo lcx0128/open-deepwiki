@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     # ChromaDB
     CHROMADB_PATH: str = "./data/chromadb"
 
-    # Embedding
+    # Embedding（可独立于 LLM API 配置；留空则回退到 OPENAI_API_KEY / OPENAI_BASE_URL）
+    EMBEDDING_API_KEY: Optional[str] = None
+    EMBEDDING_BASE_URL: Optional[str] = None
     EMBEDDING_MODEL: str = "text-embedding-ada-002"
     EMBEDDING_DIM: int = 1536
 

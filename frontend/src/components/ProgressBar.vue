@@ -29,6 +29,7 @@ const currentStageIndex = computed(() => {
 const barColor = computed(() => {
   if (props.status === 'completed') return '#10b981'
   if (props.status === 'failed') return '#ef4444'
+  if (props.status === 'cancelled' || props.status === 'interrupted') return '#f59e0b'
   return '#2563eb'
 })
 
@@ -44,14 +45,16 @@ const safeProgress = computed(() => Math.max(0, Math.min(100, props.progressPct 
         :key="stage.key"
         class="stage"
         :class="{
-          'stage--active': index === currentStageIndex && status !== 'failed',
+          'stage--active': index === currentStageIndex && status !== 'failed' && status !== 'cancelled' && status !== 'interrupted',
           'stage--done': index < currentStageIndex || status === 'completed',
           'stage--failed': status === 'failed' && index === currentStageIndex,
+          'stage--stopped': (status === 'cancelled' || status === 'interrupted') && index === currentStageIndex,
         }"
       >
         <div class="stage__dot">
           <span v-if="index < currentStageIndex || status === 'completed'">✓</span>
           <span v-else-if="status === 'failed' && index === currentStageIndex">✗</span>
+          <span v-else-if="(status === 'cancelled' || status === 'interrupted') && index === currentStageIndex">‖</span>
           <span v-else>{{ index + 1 }}</span>
         </div>
         <span class="stage__label">{{ stage.fullLabel }}</span>
@@ -72,6 +75,8 @@ const safeProgress = computed(() => Math.max(0, Math.min(100, props.progressPct 
     <div class="status-row">
       <span class="status-stage">
         <span v-if="status === 'failed'" class="status--failed">处理失败</span>
+        <span v-else-if="status === 'cancelled'" class="status--stopped">任务已中止</span>
+        <span v-else-if="status === 'interrupted'" class="status--stopped">任务已中断</span>
         <span v-else>{{ currentStage || '等待中...' }}</span>
       </span>
       <div class="status-right">
@@ -155,6 +160,12 @@ const safeProgress = computed(() => Math.max(0, Math.min(100, props.progressPct 
   color: white;
 }
 
+.stage--stopped .stage__dot {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: white;
+}
+
 .stage__label {
   font-size: 11px;
   color: var(--text-muted);
@@ -206,6 +217,7 @@ const safeProgress = computed(() => Math.max(0, Math.min(100, props.progressPct 
 
 .status-stage { color: var(--text-secondary); }
 .status--failed { color: #ef4444; font-weight: 500; }
+.status--stopped { color: #d97706; font-weight: 500; }
 .status-right { display: flex; align-items: center; gap: 12px; }
 .status-files { color: var(--text-muted); }
 .status-pct { font-weight: 700; font-size: var(--font-size-base); }

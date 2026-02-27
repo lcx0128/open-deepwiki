@@ -12,6 +12,7 @@ class RepoStatus(str, enum.Enum):
     READY = "ready"
     ERROR = "error"
     SYNCING = "syncing"
+    INTERRUPTED = "interrupted"
 
 
 class RepoPlatform(str, enum.Enum):

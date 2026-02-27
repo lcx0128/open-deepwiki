@@ -35,12 +35,19 @@ def _get_chroma_client() -> chromadb.PersistentClient:
 
 
 def _get_openai_client() -> AsyncOpenAI:
-    """懒加载 OpenAI 客户端"""
+    """懒加载 OpenAI 客户端（Embedding 专用）
+
+    优先使用 EMBEDDING_API_KEY / EMBEDDING_BASE_URL，
+    未配置时回退到 OPENAI_API_KEY / OPENAI_BASE_URL。
+    这样可以用平台 A 做 Wiki 生成（LLM），用平台 B 做向量提取（Embedding）。
+    """
     global _openai_client
     if _openai_client is None:
+        api_key = settings.EMBEDDING_API_KEY or settings.OPENAI_API_KEY or "dummy-key"
+        base_url = settings.EMBEDDING_BASE_URL or settings.OPENAI_BASE_URL
         _openai_client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY or "dummy-key",
-            base_url=settings.OPENAI_BASE_URL,
+            api_key=api_key,
+            base_url=base_url,
         )
     return _openai_client
 

@@ -34,6 +34,7 @@ class RepositoryListItem(BaseModel):
     name: str
     platform: str
     status: str
+    failed_at_stage: Optional[str] = None
     last_synced_at: Optional[datetime] = None
     created_at: datetime
 

@@ -1,6 +1,8 @@
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
+from sqlalchemy import event
 from app.config import settings
 
 
@@ -9,16 +11,30 @@ class Base(DeclarativeBase):
 
 
 # 异步引擎（SQLite 使用 aiosqlite，PostgreSQL 使用 asyncpg）
-# SQLite 不支持 pool_size/max_overflow，仅 PostgreSQL 使用
+# SQLite：使用 NullPool 避免 aiosqlite 连接跨 asyncio 事件循环复用问题。
+# Celery 每个任务通过 asyncio.run() 创建新事件循环，NullPool 确保每次都创建新连接，
+# 不会出现"connection attached to a different loop"错误。
 _engine_kwargs = {
     "echo": settings.DEBUG,
     "pool_pre_ping": True,
 }
-if not settings.DATABASE_URL.startswith("sqlite"):
+if settings.DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs["poolclass"] = NullPool
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+else:
     _engine_kwargs["pool_size"] = 5
     _engine_kwargs["max_overflow"] = 10
 
 engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
+
+# SQLite：启用 WAL 模式，允许并发读写，避免 "database is locked" 错误
+if settings.DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
 
 async_session_factory = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False

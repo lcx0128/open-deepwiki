@@ -1,6 +1,7 @@
 import re
+import json
 import logging
-from typing import List
+from typing import List, Tuple, Optional
 from app.services.llm.adapter import BaseLLMAdapter
 from app.schemas.llm import LLMMessage
 
@@ -9,6 +10,185 @@ logger = logging.getLogger(__name__)
 # Mermaid 代码块正则
 MERMAID_BLOCK_RE = re.compile(r'```mermaid\s*\n(.*?)\n\s*```', re.DOTALL)
 
+# Few-shot 修复示例，按错误类型索引
+_FIX_EXAMPLES: dict[str, str] = {
+    "中文节点": """\
+## Example: Chinese text used as node IDs
+
+WRONG (causes "Syntax error" in Mermaid 10.x):
+graph TD
+    客户端 --> API网关 --> 服务层
+    API网关 --> 数据库层
+
+CORRECT (ASCII node IDs, Chinese only inside [ ] labels):
+graph TD
+    A[客户端] --> B[API网关] --> C[服务层]
+    B --> D[数据库层]
+
+WRONG:
+graph TD
+    用户请求[用户请求] --> 路由层[路由层]
+
+CORRECT:
+graph TD
+    UserReq[用户请求] --> Router[路由层]
+
+Rule: Node IDs must be ASCII letters/numbers/underscores. Chinese text must only appear inside square brackets [ ].
+""",
+
+    "graph LR": """\
+## Example: graph LR is forbidden
+
+WRONG:
+graph LR
+    A[开始] --> B[处理] --> C[结束]
+
+CORRECT:
+graph TD
+    A[开始] --> B[处理] --> C[结束]
+
+Rule: Always use `graph TD` (top-down). Never use `graph LR`.
+""",
+
+    "括号": """\
+## Example: Unmatched brackets
+
+WRONG:
+graph TD
+    A[客户端 --> B[API网关]
+    B --> C[服务层]
+
+CORRECT:
+graph TD
+    A[客户端] --> B[API网关]
+    B --> C[服务层]
+
+WRONG:
+graph TD
+    A(处理节点 --> B[结果]
+
+CORRECT:
+graph TD
+    A(处理节点) --> B[结果]
+
+Rule: Every opening bracket [ or ( must have a matching closing bracket ] or ).
+""",
+
+    "标签过长": """\
+## Example: Node labels too long (max 30 characters)
+
+WRONG:
+graph TD
+    A[这是一个描述非常详细超过三十个字符的服务组件名称] --> B[目标]
+
+CORRECT:
+graph TD
+    A[详细服务组件] --> B[目标]
+
+Rule: Keep node labels under 30 characters. Abbreviate long names.
+""",
+
+    "erDiagram中文": """\
+## Example: erDiagram Chinese relationship labels must use double quotes
+
+WRONG (causes 'Expecting ALPHANUM got 中'):
+erDiagram
+    Project ||--o{ Wiki : 拥有
+    User ||--o{ Task : 创建
+    Repository ||--|{ FileState : 包含
+
+CORRECT (wrap Chinese labels in double quotes):
+erDiagram
+    Project ||--o{ Wiki : "拥有"
+    User ||--o{ Task : "创建"
+    Repository ||--|{ FileState : "包含"
+
+Rule: In erDiagram, any relationship label after the colon (:) that contains Chinese or non-ASCII characters MUST be wrapped in double quotes "". ASCII-only labels do not need quotes.
+""",
+
+    "激活错误": """\
+## Example: Sequence diagram activate/deactivate mismatch
+
+KEY RULE: In Mermaid, the '-' suffix deactivates the SENDER, not the receiver.
+  A->>+B: msg   → activates B (receiver)
+  B-->>-A: msg  → deactivates B (sender of this line)
+
+WRONG (deactivating a participant that was never activated):
+sequenceDiagram
+    participant API
+    participant Svc
+    API->>Svc: call
+    API-->>-Svc: Response End   ← ERROR: API was never activated
+
+CORRECT (remove the '-' if the sender was never activated):
+sequenceDiagram
+    participant API
+    participant Svc
+    API->>Svc: call
+    API-->>Svc: Response End
+
+WRONG (typical LLM mistake - deactivate on wrong message):
+sequenceDiagram
+    participant A
+    participant B
+    A->>+B: request
+    A-->>-B: done   ← ERROR: A was never activated (B was)
+
+CORRECT (deactivate goes on the response FROM B):
+sequenceDiagram
+    participant A
+    participant B
+    A->>+B: request
+    B-->>-A: response
+
+Rule: Only add '-' to a message if the SENDER of that message was previously activated with '+'.
+""",
+}
+
+
+def _build_fix_messages(block: str, errors: List[str]) -> Tuple[str, str]:
+    """
+    根据检测到的错误类型，构建包含针对性 few-shot 示例的修复提示。
+    返回 (system_content, user_content)。
+    """
+    system_content = (
+        "You are a Mermaid diagram syntax expert. "
+        "Your only job is to return corrected Mermaid code. "
+        "Follow the examples exactly. "
+        "Output ONLY the raw Mermaid code — no explanation, no ```mermaid wrapper."
+    )
+
+    # 按检测到的错误类型选择相关示例
+    error_text = " ".join(errors)
+    selected: List[str] = []
+    if "中文" in error_text or "节点ID" in error_text:
+        selected.append(_FIX_EXAMPLES["中文节点"])
+    if "graph LR" in error_text:
+        selected.append(_FIX_EXAMPLES["graph LR"])
+    if "括号" in error_text:
+        selected.append(_FIX_EXAMPLES["括号"])
+    if "过长" in error_text:
+        selected.append(_FIX_EXAMPLES["标签过长"])
+    if "erDiagram" in error_text or ("中文" in error_text and "双引号" in error_text):
+        if "erDiagram中文" in _FIX_EXAMPLES:
+            selected.append(_FIX_EXAMPLES["erDiagram中文"])
+    if "激活" in error_text or "inactivate" in error_text or "activate" in error_text.lower():
+        selected.append(_FIX_EXAMPLES["激活错误"])
+
+    examples_section = ("\n".join(selected) + "\n---\n\n") if selected else ""
+
+    error_list = "\n".join(f"  - {e}" for e in errors)
+    user_content = (
+        f"{examples_section}"
+        f"Fix the following Mermaid diagram.\n\n"
+        f"Errors detected:\n{error_list}\n\n"
+        f"Broken diagram:\n"
+        f"```mermaid\n{block}\n```\n\n"
+        "Return ONLY the corrected Mermaid code (no wrapper, no explanation)."
+    )
+
+    return system_content, user_content
+
 # 常见语法错误检测规则
 MERMAID_RULES = [
     (re.compile(r'graph\s+LR'), "禁止使用 graph LR，必须使用 graph TD"),
@@ -16,6 +196,8 @@ MERMAID_RULES = [
     (re.compile(r'\([^)]{50,}\)'), "节点标签过长（超过50字符）"),
     # 排除合法的激活(+)和去激活(-)修饰符，以及节点标识符（单词字符）
     (re.compile(r'-->>(?![+\-\w])[^:\s]'), "箭头后缺少空格或冒号"),
+    # erDiagram 中文关系标签未加双引号（冒号后直接跟中文，未用引号包裹）
+    (re.compile(r':\s+(?!")[\u4e00-\u9fff\u3400-\u4dbf]'), "erDiagram/关系图中中文标签必须用双引号包裹，例：: 拥有 → : \"拥有\""),
 ]
 
 # 不包含 {} ：erDiagram 使用 ||--o{ 这类不对称的花括号表示基数，无需匹配
@@ -43,6 +225,30 @@ def validate_mermaid(mermaid_code: str) -> List[str]:
                 "节点ID含中文字符：Mermaid 10.x 节点ID必须用ASCII英文，"
                 "中文只能放在标签内，示例：A[API网关] --> B[服务层]"
             )
+
+    # sequenceDiagram 激活/去激活语义检查
+    # Mermaid 规则：'-' 去激活的是发送方（sender），不是接收方
+    # A->>+B 激活 B；B-->>-A 去激活 B（B 是发送方）
+    if re.search(r'^\s*sequenceDiagram', mermaid_code, re.MULTILINE | re.IGNORECASE):
+        active_set: set = set()
+        for line in mermaid_code.splitlines():
+            stripped = line.strip()
+            # 激活：A->>+B 或 A-->+B
+            m = re.match(r'(\w+)\s*[-\-]+>>?\+(\w+)\s*:', stripped)
+            if m:
+                active_set.add(m.group(2))
+                continue
+            # 去激活：A->>-B 或 A-->-B（去激活发送方 A）
+            m = re.match(r'(\w+)\s*[-\-]+>>?-(\w+)\s*:', stripped)
+            if m:
+                sender = m.group(1)
+                if sender not in active_set:
+                    errors.append(
+                        f"序列图激活错误：{sender} 未被激活就被去激活（'-' 作用于发送方），"
+                        "请移除 '-' 或先用 '+' 激活该参与者"
+                    )
+                else:
+                    active_set.discard(sender)
 
     # 括号匹配检查（跳过字符串字面量和注释）
     stack = []
@@ -93,20 +299,18 @@ async def validate_and_fix_mermaid(
                 continue
 
             all_valid = False
-            logger.warning(f"[MermaidValidator] 发现 {len(errors)} 个错误，第 {attempt + 1} 次修复")
-            fix_prompt = (
-                f"The following Mermaid diagram has syntax errors:\n\n"
-                f"```mermaid\n{block}\n```\n\n"
-                f"Errors found:\n"
-                + "\n".join(f"- {e}" for e in errors)
-                + "\n\nPlease fix ALL errors and return ONLY the corrected Mermaid code "
-                  "(without ```mermaid wrapper).\n"
-                  "Remember: use graph TD (not LR), proper arrow syntax, and short node labels."
+            logger.warning(
+                f"[MermaidValidator] 发现 {len(errors)} 个错误，第 {attempt + 1} 次修复: "
+                + "; ".join(errors)
             )
+            system_content, user_content = _build_fix_messages(block, errors)
 
             try:
                 fix_response = await adapter.generate_with_rate_limit(
-                    messages=[LLMMessage(role="user", content=fix_prompt)],
+                    messages=[
+                        LLMMessage(role="system", content=system_content),
+                        LLMMessage(role="user", content=user_content),
+                    ],
                     model=model,
                     temperature=0.1,
                 )
@@ -138,4 +342,201 @@ async def validate_and_fix_mermaid(
 
         content = MERMAID_BLOCK_RE.sub(_degrade, content)
 
+    return content
+
+
+# ── diagram-spec 处理 ──────────────────────────────────────────────────────
+
+DIAGRAM_SPEC_RE = re.compile(r'```diagram-spec\s*\n(.*?)\n\s*```', re.DOTALL)
+
+
+def _clean_json(raw: str) -> str:
+    """清理 LLM 输出 JSON 中的常见问题：尾随逗号、单行注释、多行注释。"""
+    # 移除单行注释 // ...
+    raw = re.sub(r"//[^\n]*", "", raw)
+    # 移除多行注释 /* ... */
+    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
+    # 移除尾随逗号（} 或 ] 之前）
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+    return raw.strip()
+
+
+def _repair_truncated_json(raw: str) -> str:
+    """
+    修复截断的 JSON：关闭未闭合的字符串和括号。
+    适用于 LLM 输出被 token 限制截断的情况。
+    """
+    try:
+        json.loads(raw)
+        return raw  # 已合法，无需修复
+    except json.JSONDecodeError:
+        pass
+
+    stack = []       # 未闭合的括号栈
+    in_string = False
+    escape_next = False
+
+    for ch in raw:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+
+    # 构建修复后缀
+    suffix = ""
+    if in_string:
+        suffix += '"'                          # 关闭未闭合的字符串
+    for ch in reversed(stack):
+        suffix += "}" if ch == "{" else "]"   # 关闭未闭合的括号
+
+    repaired = raw + suffix
+    try:
+        json.loads(repaired)
+        logger.info("[DiagramAssembler] JSON 截断修复成功")
+        return repaired
+    except json.JSONDecodeError:
+        return raw  # 修复失败，返回原始（后续 json.loads 会抛出异常）
+
+
+def process_diagram_specs(content: str) -> str:
+    """
+    将内容中的 ```diagram-spec JSON 块转换为 ```mermaid 块。
+    解析失败时保留原始块（不崩溃），由后续 retry_failed_diagram_specs 兜底。
+    """
+    from app.services.diagram_assembler import assemble_diagram
+
+    def _replace(match: re.Match) -> str:
+        raw = _repair_truncated_json(_clean_json(match.group(1)))
+        try:
+            spec_json = json.loads(raw)
+            mermaid_code = assemble_diagram(spec_json)
+            logger.info(
+                f"[DiagramAssembler] 成功组装 {spec_json.get('type')} 图表"
+            )
+            return f"```mermaid\n{mermaid_code}\n```"
+        except Exception as e:
+            logger.warning(f"[DiagramAssembler] 图表规格解析失败，保留原始块: {e}")
+            return match.group(0)
+
+    return DIAGRAM_SPEC_RE.sub(_replace, content)
+
+
+async def _fix_diagram_spec_json(
+    raw_json: str, adapter: BaseLLMAdapter, model: str
+) -> Optional[str]:
+    """
+    对单个失败的 diagram-spec JSON 调用专注 LLM 会话进行修复。
+    返回修复后的 JSON 字符串，失败返回 None。
+    这是"只重试图表"功能的核心：独立会话，上下文只包含图表规格，
+    不携带页面文字内容，给 LLM 更多空间描述正确的生成方式。
+    """
+    system_content = (
+        "You are a diagram-spec JSON repair expert. "
+        "Fix the broken JSON so it matches the diagram-spec schema exactly. "
+        "Return ONLY the fixed JSON object — no explanation, no code fences.\n\n"
+        "Schema rules:\n"
+        "- type: 'flowchart' | 'erDiagram' | 'sequenceDiagram'\n"
+        "- flowchart shape: 'rect' | 'round' | 'diamond' | 'stadium' | 'subroutine'\n"
+        "- sequenceDiagram arrow: '->' | '->>' | '-->' | '-->>'\n"
+        "- erDiagram key: 'PK' | 'FK' | 'UK' | omit the field\n"
+        "- messages array: ONLY objects with 'from_alias' and 'to_alias' fields\n"
+        "  (remove any loop/alt/else/note objects from messages array)\n"
+        "- activate/deactivate: use ONLY when you are certain about the pairing\n"
+        "  (when in doubt, omit both fields — plain arrows always render correctly)"
+    )
+    user_content = (
+        f"Fix this broken diagram-spec JSON:\n\n{raw_json}\n\n"
+        "Common issues to fix:\n"
+        "- Missing or mismatched quotes around string values\n"
+        "- Trailing commas before } or ]\n"
+        "- Invalid shape values (use 'subroutine' for database/db/cylinder)\n"
+        "- Invalid arrow values (use '->>' for requests, '-->>' for responses)\n"
+        "- Non-message objects in messages array (remove loop/alt/else objects)\n"
+        "- Empty string key values (remove the key field entirely)\n"
+        "Return ONLY the fixed JSON object."
+    )
+    try:
+        resp = await adapter.generate_with_rate_limit(
+            messages=[
+                LLMMessage(role="system", content=system_content),
+                LLMMessage(role="user", content=user_content),
+            ],
+            model=model,
+            temperature=0.1,
+        )
+        fixed = resp.content.strip()
+        # 清理可能残留的代码围栏
+        fixed = re.sub(r'^```\w*\s*\n?', '', fixed)
+        fixed = re.sub(r'\n?```\s*$', '', fixed)
+        return fixed.strip()
+    except Exception as e:
+        logger.error(f"[DiagramRetry] JSON 修复调用失败: {e}")
+        return None
+
+
+async def retry_failed_diagram_specs(
+    content: str, adapter: BaseLLMAdapter, model: str, max_retries: int = 2
+) -> str:
+    """
+    对 process_diagram_specs() 后残留的 diagram-spec 块（JSON 解析失败）
+    进行专注重试：只重新生成图表，不重新生成页面文字内容。
+
+    这实现了用户的优化思路：
+    - 第一次出错后，文字内容已确认正确，只有图表有问题
+    - 调用独立 LLM 会话，上下文只包含图表 JSON，不携带页面内容
+    - 更小的上下文 → 更低的幻觉率 → 更高的修复成功率
+    """
+    from app.services.diagram_assembler import assemble_diagram
+
+    for attempt in range(max_retries):
+        remaining = DIAGRAM_SPEC_RE.findall(content)
+        if not remaining:
+            break
+
+        fixed_any = False
+        for raw in remaining:
+            logger.info(
+                f"[DiagramRetry] 第 {attempt + 1} 次重试失败的 diagram-spec 块"
+            )
+            fixed_json = await _fix_diagram_spec_json(raw, adapter, model)
+            if not fixed_json:
+                continue
+
+            repaired = _repair_truncated_json(_clean_json(fixed_json))
+            try:
+                spec_json = json.loads(repaired)
+                mermaid_code = assemble_diagram(spec_json)
+                content = content.replace(
+                    f"```diagram-spec\n{raw}\n```",
+                    f"```mermaid\n{mermaid_code}\n```",
+                    1,
+                )
+                logger.info(
+                    f"[DiagramRetry] diagram-spec 修复成功: {spec_json.get('type')}"
+                )
+                fixed_any = True
+            except Exception as e:
+                logger.warning(f"[DiagramRetry] 修复后仍无法组装: {e}")
+
+        if not fixed_any:
+            break  # 本轮没有任何修复成功，停止重试
+
+    # 最终仍失败的 diagram-spec 块降级为 text
+    def _degrade_spec(match: re.Match) -> str:
+        logger.warning("[DiagramRetry] diagram-spec 无法修复，降级为 text 块")
+        return f"```text\n{match.group(1)}\n```"
+
+    content = DIAGRAM_SPEC_RE.sub(_degrade_spec, content)
     return content

@@ -75,7 +75,7 @@ async def regenerate_wiki(
         select(Task).where(
             Task.repo_id == repo_id,
             Task.type == TaskType.WIKI_REGENERATE,
-            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]),
         )
     )
     active_task = active_task_result.scalars().first()

@@ -20,9 +20,10 @@ export interface RepositoryItem {
   url: string
   name: string
   platform: string
-  status: 'pending' | 'cloning' | 'ready' | 'error' | 'syncing'
+  status: 'pending' | 'cloning' | 'ready' | 'error' | 'syncing' | 'interrupted'
   last_synced_at: string | null
   created_at: string
+  failed_at_stage?: string | null
 }
 
 export interface RepositoryListResponse {
@@ -36,7 +37,7 @@ export interface TaskStatusResponse {
   id: string
   repo_id: string
   type: string
-  status: 'pending' | 'cloning' | 'parsing' | 'embedding' | 'generating' | 'completed' | 'failed' | 'cancelled'
+  status: 'pending' | 'cloning' | 'parsing' | 'embedding' | 'generating' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
   progress_pct: number
   current_stage: string | null
   files_total: number
@@ -89,6 +90,13 @@ export interface FileContentResponse {
   start_line: number
   total_lines: number
   language: string
+}
+
+export async function abortRepository(repoId: string): Promise<{ message: string; repo_id: string }> {
+  const response = await apiClient.post<{ message: string; repo_id: string }>(
+    `/repositories/${repoId}/abort`
+  )
+  return response.data
 }
 
 export async function syncRepository(

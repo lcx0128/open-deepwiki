@@ -50,7 +50,7 @@ async def submit_repository(
     existing_repo = existing_result.scalar_one_or_none()
 
     if existing_repo:
-        # 检查是否有进行中的任务
+        # 检查是否有进行中的任务（INTERRUPTED 视为终态，允许重新提交）
         active_task_result = await db.execute(
             select(Task).where(
                 Task.repo_id == existing_repo.id,
@@ -58,6 +58,7 @@ async def submit_repository(
                     TaskStatus.COMPLETED,
                     TaskStatus.FAILED,
                     TaskStatus.CANCELLED,
+                    TaskStatus.INTERRUPTED,
                 ])
             )
         )
@@ -85,15 +86,18 @@ async def submit_repository(
         await db.flush()
         task_type = TaskType.FULL_PROCESS
 
-    # 3. 创建 Task 记录
+    # 3. 创建 Task 记录，先提交确保 Celery worker 能通过 task_id 查到记录
     task = Task(repo_id=repo.id, type=task_type)
     db.add(task)
     await db.flush()
+    task_id = task.id  # 在 commit 前保存，expire_on_commit=False 下对象保持有效
+    await db.commit()
 
     # 4. 发送 Celery 任务（PAT Token 仅作为参数传递，不持久化）
+    # 必须在 commit 之后调用，避免 Celery worker 在事务提交前读取 DB 导致 task 为 None
     from app.tasks.process_repo import process_repository_task
     celery_result = process_repository_task.delay(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo.id,
         repo_url=request.url,
         pat_token=request.pat_token,
@@ -147,8 +151,30 @@ async def list_repositories(
     result = await db.execute(query)
     repos = result.scalars().all()
 
+    # 获取各仓库最新失败任务的 failed_at_stage
+    repo_ids = [r.id for r in repos]
+    failed_at_stage_map: dict[str, Optional[str]] = {}
+    if repo_ids:
+        # 查询每个仓库最新的 FAILED 任务（按 created_at 倒序，取第一条）
+        failed_tasks_result = await db.execute(
+            select(Task.repo_id, Task.failed_at_stage)
+            .where(
+                Task.repo_id.in_(repo_ids),
+                Task.status == TaskStatus.FAILED,
+            )
+            .order_by(Task.created_at.desc())
+        )
+        for row in failed_tasks_result.all():
+            if row.repo_id not in failed_at_stage_map:
+                failed_at_stage_map[row.repo_id] = row.failed_at_stage
+
+    def _build_list_item(r) -> RepositoryListItem:
+        item = RepositoryListItem.model_validate(r)
+        item.failed_at_stage = failed_at_stage_map.get(r.id)
+        return item
+
     return RepositoryListResponse(
-        items=[RepositoryListItem.model_validate(r) for r in repos],
+        items=[_build_list_item(r) for r in repos],
         total=total,
         page=page,
         per_page=per_page,
@@ -174,11 +200,11 @@ async def reprocess_repository(
     if not repo:
         raise HTTPException(status_code=404, detail="仓库不存在")
 
-    # 检查是否有进行中的任务
+    # 检查是否有进行中的任务（INTERRUPTED 视为终态，允许重新处理）
     active_result = await db.execute(
         select(Task).where(
             Task.repo_id == repo_id,
-            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]),
         )
     )
     active_task = active_result.scalars().first()
@@ -196,10 +222,12 @@ async def reprocess_repository(
     db.add(task)
     repo.status = RepoStatus.CLONING
     await db.flush()
+    task_id = task.id
+    await db.commit()
 
     from app.tasks.process_repo import process_repository_task
     celery_result = process_repository_task.delay(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         repo_url=repo.url,
         llm_provider=request.llm_provider,
@@ -209,7 +237,7 @@ async def reprocess_repository(
     await db.commit()
 
     return RepositoryCreateResponse(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         status="pending",
         message="全量重新处理任务已提交",
@@ -241,11 +269,11 @@ async def sync_repository(
             detail="仓库尚未克隆，请先提交完整处理任务",
         )
 
-    # 检查是否有进行中的任务
+    # 检查是否有进行中的任务（INTERRUPTED 视为终态，允许重新同步）
     active_result = await db.execute(
         select(Task).where(
             Task.repo_id == repo_id,
-            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]),
         )
     )
     active_task = active_result.scalars().first()
@@ -263,10 +291,12 @@ async def sync_repository(
     db.add(task)
     repo.status = RepoStatus.SYNCING
     await db.flush()
+    task_id = task.id
+    await db.commit()
 
     from app.tasks.process_repo import process_repository_task
     celery_result = process_repository_task.delay(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         repo_url=repo.url,
         llm_provider=request.llm_provider,
@@ -276,11 +306,60 @@ async def sync_repository(
     await db.commit()
 
     return RepositoryCreateResponse(
-        task_id=task.id,
+        task_id=task_id,
         repo_id=repo_id,
         status="pending",
         message="增量同步任务已提交",
     )
+
+
+@router.post(
+    "/{repo_id}/abort",
+    status_code=status.HTTP_200_OK,
+    summary="中止仓库当前所有生成任务",
+)
+async def abort_repository_tasks(repo_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    中止指定仓库的所有活跃任务，将任务状态设为 INTERRUPTED，仓库状态设为 INTERRUPTED。
+    中止后可通过「重新处理」恢复。
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+
+    active_result = await db.execute(
+        select(Task).where(
+            Task.repo_id == repo_id,
+            ~Task.status.in_([
+                TaskStatus.COMPLETED, TaskStatus.FAILED,
+                TaskStatus.CANCELLED, TaskStatus.INTERRUPTED,
+            ]),
+        )
+    )
+    active_tasks = active_result.scalars().all()
+
+    if not active_tasks:
+        return {"message": "该仓库当前没有活跃任务", "repo_id": repo_id}
+
+    from app.core.redis_client import set_cancel_flag
+    for task in active_tasks:
+        try:
+            await set_cancel_flag(task.id)
+        except Exception:
+            pass
+        if task.celery_task_id:
+            try:
+                from app.celery_app import celery_app
+                celery_app.control.revoke(task.celery_task_id, terminate=True, signal="SIGTERM")
+            except Exception:
+                pass
+        task.status = TaskStatus.INTERRUPTED
+        task.error_msg = "用户手动中止任务"
+
+    repo.status = RepoStatus.INTERRUPTED
+    await db.commit()
+
+    return {"message": f"已中止 {len(active_tasks)} 个任务", "repo_id": repo_id}
 
 
 @router.delete(
@@ -302,20 +381,40 @@ async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
     if not repo:
         raise HTTPException(status_code=404, detail="仓库不存在")
 
-    # 1. 撤销所有活跃 Celery 任务（含卡死的中间状态任务）
+    # 1. 撤销所有活跃 Celery 任务
+    # 优先通过 Redis 标志通知 worker 取消（无需 DB 写权限，避免写锁竞争）
     active_result = await db.execute(
         select(Task).where(
             Task.repo_id == repo_id,
-            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]),
         )
     )
-    for task in active_result.scalars().all():
-        if task.celery_task_id:
+    active_tasks = active_result.scalars().all()
+    if active_tasks:
+        from app.core.redis_client import set_cancel_flag
+        for task in active_tasks:
+            # 设置 Redis 取消标志（立即生效，worker 下次检查时会感知）
             try:
-                from app.celery_app import celery_app
-                celery_app.control.revoke(task.celery_task_id, terminate=True)
+                await set_cancel_flag(task.id)
             except Exception:
-                pass  # broker 不可达时忽略，DB 级联删除仍会清理记录
+                pass
+            if task.celery_task_id:
+                try:
+                    from app.celery_app import celery_app
+                    # terminate=True + signal=SIGTERM 确保任务从队列中真正撤销
+                    celery_app.control.revoke(task.celery_task_id, terminate=True, signal="SIGTERM")
+                except Exception:
+                    pass
+        # 尝试将 DB 状态设为 CANCELLED（可能因 worker 持有写锁而失败，Redis 标志已足够）
+        try:
+            for task in active_tasks:
+                task.status = TaskStatus.CANCELLED
+            await db.commit()
+        except Exception:
+            await db.rollback()
+        # 等待 worker 检测到取消标志并在下次页面提交时释放写锁
+        import asyncio as _asyncio
+        await _asyncio.sleep(2.0)
 
     local_path = repo.local_path
 

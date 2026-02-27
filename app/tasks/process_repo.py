@@ -9,6 +9,11 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+class TaskCancelledException(Exception):
+    """任务被外部取消（DELETE /repositories/{id} 触发），不触发 Celery 重试"""
+    pass
+
+
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
 def process_repository_task(
     self,
@@ -36,7 +41,7 @@ def process_repository_task(
             llm_model=llm_model,
         ))
     except Exception as exc:
-        if self.request.retries < self.max_retries:
+        if self.request.retries < self.max_retries and not isinstance(exc, TaskCancelledException):
             countdown = 30 * (2 ** self.request.retries)  # 30s → 60s
             logger.warning(
                 f"[Task] 任务异常，{countdown}s 后自动重试 "
@@ -69,6 +74,30 @@ async def _run_task(
 
     logger.info(f"[Task] 开始执行: task_id={task_id} repo_id={repo_id} url={repo_url} branch={branch}")
 
+    # ===== 入口合法性校验：防止幽灵任务（已删除仓库/已中断任务自动续传）=====
+    try:
+        async with async_session_factory() as _db:
+            _task_check = await _db.get(Task, task_id)
+            if _task_check is None:
+                logger.warning(
+                    f"[Task] task_id={task_id} 在数据库中不存在（仓库可能已被删除），任务终止"
+                )
+                return
+            if _task_check.status == TaskStatus.INTERRUPTED:
+                logger.warning(
+                    f"[Task] task_id={task_id} 状态为 INTERRUPTED，拒绝自动续传，任务终止"
+                )
+                return
+            _repo_check = await _db.get(Repository, repo_id)
+            if _repo_check is None:
+                logger.warning(
+                    f"[Task] repo_id={repo_id} 在数据库中不存在（仓库可能已被删除），任务终止"
+                )
+                return
+    except Exception as _e:
+        logger.error(f"[Task] 入口校验异常，任务终止: {_e}", exc_info=True)
+        return
+
     # init_redis 单独保护：失败时尝试将 DB 状态标记为 FAILED
     try:
         await init_redis()
@@ -98,11 +127,27 @@ async def _run_task(
                         from app.services.wiki_generator import generate_wiki
 
                         async def _wiki_regen_progress(pct: float, msg: str):
-                            await _publish(task_id, "generating", 75 + pct * 0.2, msg)
+                            actual_pct = 75 + pct * 0.2
+                            try:
+                                from app.core.redis_client import check_cancel_flag
+                                if await check_cancel_flag(task_id):
+                                    raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
+                            except TaskCancelledException:
+                                raise
+                            except Exception:
+                                pass
+                            await _update_task(db, task_id, TaskStatus.GENERATING, actual_pct, msg)
+                            await _publish(task_id, "generating", actual_pct, msg)
+
+                        async def _wiki_regen_cancel():
+                            from app.core.redis_client import check_cancel_flag
+                            if await check_cancel_flag(task_id):
+                                raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
 
                         wiki_id = await generate_wiki(
                             db, repo_id, llm_provider, llm_model,
                             progress_callback=_wiki_regen_progress,
+                            cancel_checker=_wiki_regen_cancel,
                         )
                     except NotImplementedError:
                         pass
@@ -261,11 +306,29 @@ async def _run_task(
                     from app.services.wiki_generator import generate_wiki
 
                     async def _wiki_progress(pct: float, msg: str):
-                        await _publish(task_id, "generating", 75 + pct * 0.2, msg)
+                        actual_pct = 75 + pct * 0.2
+                        # 先检查 Redis 取消标志（无需 DB 写权限）
+                        try:
+                            from app.core.redis_client import check_cancel_flag
+                            if await check_cancel_flag(task_id):
+                                raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
+                        except TaskCancelledException:
+                            raise
+                        except Exception:
+                            pass
+                        # 更新 DB 进度（同时检查 DB 中的 CANCELLED 状态，并提交释放写锁）
+                        await _update_task(db, task_id, TaskStatus.GENERATING, actual_pct, msg)
+                        await _publish(task_id, "generating", actual_pct, msg)
+
+                    async def _wiki_cancel():
+                        from app.core.redis_client import check_cancel_flag
+                        if await check_cancel_flag(task_id):
+                            raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
 
                     wiki_id = await generate_wiki(
                         db, repo_id, llm_provider, llm_model,
                         progress_callback=_wiki_progress,
+                        cancel_checker=_wiki_cancel,
                     )
                 except NotImplementedError:
                     pass
@@ -284,6 +347,10 @@ async def _run_task(
 
             except Exception as e:
                 await db.rollback()
+                # 任务被外部取消时，优雅退出，不标记为 FAILED，不重试
+                if isinstance(e, TaskCancelledException):
+                    logger.info(f"[Task] 任务已被取消，正常退出: task_id={task_id}")
+                    return
                 error_msg = str(e)
                 # 脱敏：移除可能残留的 Token 字符串
                 error_msg = re.sub(r'https://oauth2:[^@]+@', 'https://[REDACTED]@', error_msg)
@@ -303,7 +370,7 @@ async def _reset_task_for_retry(task_id: str):
     from app.models.task import Task, TaskStatus
     async with async_session_factory() as db:
         task = await db.get(Task, task_id)
-        if task:
+        if task and task.status not in (TaskStatus.INTERRUPTED, TaskStatus.CANCELLED):
             task.status = TaskStatus.PENDING
             task.error_msg = None
             task.failed_at_stage = None
@@ -312,9 +379,12 @@ async def _reset_task_for_retry(task_id: str):
 
 async def _update_task(db, task_id: str, status, progress: float, stage: str):
     """更新数据库中的任务状态（立即 commit，确保其他连接可见）"""
-    from app.models.task import Task
+    from app.models.task import Task, TaskStatus
     task = await db.get(Task, task_id)
     if task:
+        # 检查是否已被外部取消或中止（DELETE/abort 端点会先将状态设为 CANCELLED/INTERRUPTED）
+        if task.status in (TaskStatus.CANCELLED, TaskStatus.INTERRUPTED):
+            raise TaskCancelledException(f"任务 {task_id} 已被取消/中止，停止处理")
         task.status = status
         task.progress_pct = progress
         task.current_stage = stage

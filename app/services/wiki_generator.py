@@ -2,6 +2,8 @@
 模块三：Wiki 生成服务。
 基于 ChromaDB 中的 ChunkNode 向量数据，通过两阶段 LLM 调用生成 Wiki 文档。
 """
+import asyncio
+import json as _json
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -15,47 +17,141 @@ from app.services.embedder import get_collection
 from app.schemas.llm import LLMMessage
 from app.models.wiki import Wiki, WikiSection, WikiPage
 from app.models.repository import Repository
-from app.services.mermaid_validator import validate_and_fix_mermaid
+from app.services.mermaid_validator import (
+    validate_and_fix_mermaid,
+    process_diagram_specs,
+    retry_failed_diagram_specs,
+)
 from app.services.token_degradation import is_token_overflow, generate_with_degradation
 
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# Mermaid 约束 System Prompt
+# 图表生成 System Prompt（JSON spec 格式）
 # ============================================================
 MERMAID_CONSTRAINT_PROMPT = """
-When generating Mermaid diagrams, you MUST follow these rules strictly to prevent parsing errors:
+╔══════════════════════════════════════════════════════════════════╗
+║  DIAGRAM OUTPUT FORMAT — STRICT REQUIREMENT                      ║
+║                                                                  ║
+║  ✗ FORBIDDEN: ```mermaid  (raw Mermaid will cause syntax errors) ║
+║  ✓ REQUIRED:  ```diagram-spec  (JSON → assembled by Python)      ║
+╚══════════════════════════════════════════════════════════════════╝
 
-1. Flow/architecture diagrams: 
-   - ALWAYS use `flowchart TD` (top-down). NEVER use `graph LR` or `graph TD`.
-   - If using `subgraph`, you MUST properly close it with `end`.
+NEVER output a ```mermaid code block. It will break.
+ALWAYS output diagrams as ```diagram-spec JSON. The assembler handles:
+  - ASCII node IDs (auto-sanitized)
+  - Chinese label quoting in erDiagram (auto-added)
+  - Node label length limits (auto-truncated)
+  - flowchart direction (enforced)
+You do NOT need to worry about any Mermaid syntax rules — just write valid JSON.
 
-2. Sequence diagrams:
-   - Start with `sequenceDiagram` on its own line.
-   - ALWAYS declare participants first using aliases (e.g., `participant A as 客户端`).
-   - Sync call: `A->>B: message` | Async return: `B-->>A: response`
-   - Activation: `A->>+B: request`, `B-->>-A: response`
+━━━ FLOWCHART (架构图 / 模块关系图) ━━━
+```diagram-spec
+{
+  "type": "flowchart",
+  "direction": "TD",
+  "nodes": [
+    {"id": "Client",  "label": "客户端",        "shape": "rect"},
+    {"id": "API",     "label": "API网关",        "shape": "rect"},
+    {"id": "Worker",  "label": "Celery Worker", "shape": "stadium"},
+    {"id": "DB",      "label": "PostgreSQL",    "shape": "subroutine"},
+    {"id": "Cache",   "label": "Redis",         "shape": "subroutine"}
+  ],
+  "edges": [
+    {"from_id": "Client", "to_id": "API",    "label": "HTTP请求"},
+    {"from_id": "API",    "to_id": "Worker", "label": "发布任务"},
+    {"from_id": "Worker", "to_id": "DB",     "label": "状态更新"},
+    {"from_id": "Worker", "to_id": "Cache",  "label": "缓存写入"}
+  ],
+  "subgraphs": [
+    {"id": "backend", "label": "后端服务", "node_ids": ["API", "Worker"]}
+  ]
+}
+```
 
-3. ER diagrams:
-   - Use `erDiagram` keyword.
-   - Cardinality: `||--o{` (1:N), `||--||` (1:1), `}o--o{` (M:N).
+━━━ ER DIAGRAM (数据模型图) ━━━
+```diagram-spec
+{
+  "type": "erDiagram",
+  "entities": [
+    {
+      "name": "Repository",
+      "attributes": [
+        {"type": "string", "name": "id",     "key": "PK"},
+        {"type": "string", "name": "url"},
+        {"type": "string", "name": "status"}
+      ]
+    },
+    {
+      "name": "Task",
+      "attributes": [
+        {"type": "string", "name": "id",      "key": "PK"},
+        {"type": "string", "name": "repo_id", "key": "FK"},
+        {"type": "string", "name": "type"}
+      ]
+    }
+  ],
+  "relationships": [
+    {"from_entity": "Repository", "to_entity": "Task", "cardinality": "||--o{", "label": "包含"}
+  ]
+}
+```
 
-4. LABEL TEXT SAFETY (CRITICAL):
-   - NEVER use HTML tags.
-   - ALL node labels MUST be wrapped in double quotes. 
-     CORRECT: `A["User (Client)"]` or `B["数据库"]`
-     WRONG: `A[User (Client)]` or `B[数据库]`
-   - NEVER use double quotes inside the label text itself.
+━━━ SEQUENCE DIAGRAM (时序图 / 调用流程) ━━━
+```diagram-spec
+{
+  "type": "sequenceDiagram",
+  "participants": [
+    {"alias": "Client", "name": "客户端"},
+    {"alias": "API",    "name": "FastAPI"},
+    {"alias": "DB",     "name": "数据库"}
+  ],
+  "messages": [
+    {"from_alias": "Client", "to_alias": "API", "message": "POST /api/tasks", "arrow": "->>"},
+    {"from_alias": "API",    "to_alias": "DB",  "message": "INSERT Task",     "arrow": "->>"},
+    {"from_alias": "DB",     "to_alias": "API", "message": "task_id",         "arrow": "-->>"},
+    {"from_alias": "API",    "to_alias": "Client", "message": "202 Accepted", "arrow": "-->>"}
+  ]
+}
+```
 
-5. NODE ID SAFETY (CRITICAL):
-   - Node IDs MUST be ASCII-only (letters, numbers, underscores). 
-   - Chinese/non-ASCII text MUST ONLY appear inside the quoted label brackets.
-     CORRECT: `A["客户端"] --> B["API网关"]`
-     WRONG:   `客户端 --> API网关` (Chinese as Node IDs will crash the parser)
+━━━ FIELD REFERENCE ━━━
+flowchart shape (ONLY these values):
+  "rect"       - rectangle (default, for services/APIs)
+  "round"      - rounded rectangle (for processes)
+  "diamond"    - decision node
+  "stadium"    - pill shape (for workers/queues)
+  "subroutine" - double-border rectangle (for databases/storage)
+  FORBIDDEN shapes: "db", "database", "cylinder", "circle" — use "subroutine" or "round" instead
 
-6. Keep diagrams clean:
-   - Max 30 characters per label.
-   - Max 20 nodes per diagram.
+sequenceDiagram arrow (ONLY these values):
+  "->>"  - solid arrow (request/call)
+  "-->>" - dashed arrow (response/async)
+  "->"   - thin solid arrow
+  "-->"  - thin dashed arrow
+  FORBIDDEN arrows: "<--", "<<--", "<-", "<<-"
+
+sequenceDiagram activate/deactivate:
+  AVOID using activate/deactivate unless you are certain about the pairing.
+  Plain arrows (no activate/deactivate) always render correctly.
+  If you must use them: activate:true on the REQUEST message (activates receiver),
+  deactivate:true on the RESPONSE message FROM the activated participant back to caller.
+
+erDiagram key (ONLY these values or omit):
+  "PK" - primary key
+  "FK" - foreign key
+  "UK" - unique key
+  FORBIDDEN: "", "Unique", "primary", "foreign" — use "PK"/"FK"/"UK" or omit the key field
+
+erDiagram cardinality examples: "||--||", "||--o{", "}o--o{", "||--|{"
+
+━━━ STRICT RULES ━━━
+1. ALWAYS use ```diagram-spec JSON — NEVER write raw ```mermaid blocks.
+2. messages array: ONLY objects with "from_alias" and "to_alias" fields.
+   NEVER put loop/alt/else/note constructs inside the messages array.
+3. Node/participant IDs: ASCII letters, numbers, underscores ONLY.
+4. Node labels: max 30 characters.
+5. Max 15 nodes per flowchart diagram.
 """
 
 WIKI_OUTLINE_PROMPT = """You are a technical documentation expert. Analyze this code repository and create a COMPREHENSIVE, DETAILED wiki structure with 6-10 sections.
@@ -138,10 +234,10 @@ Write a COMPREHENSIVE, DETAILED Markdown page that:
 
 1. **Code Location Citations (MANDATORY)**: For every function, class, or feature you describe, you MUST cite the exact location: `file_path:start_line-end_line` (e.g., `app/services/wiki_generator.py:110-216`). Never describe a function without citing where it lives.
 
-2. **Architecture/Flow Diagrams (MANDATORY for architecture and flow pages)**: Include at least one Mermaid diagram showing:
-   - For architecture pages: component relationships using `graph TD`
-   - For flow/pipeline pages: sequence diagrams using `sequenceDiagram`
-   - For data model pages: ER diagrams using `erDiagram`
+2. **Architecture/Flow Diagrams (MANDATORY for architecture and flow pages)**: Include at least one diagram using the ```diagram-spec JSON format (see system prompt):
+   - For architecture pages: `"type": "flowchart"` showing component relationships
+   - For flow/pipeline pages: `"type": "sequenceDiagram"` showing call sequence
+   - For data model pages: `"type": "erDiagram"` showing entity relationships
 
 3. **Module Relationship Explanation**: Explain how this module/component interacts with OTHER modules. What does it call? What calls it? What data does it receive and produce?
 
@@ -159,6 +255,82 @@ Aim for comprehensive coverage: a reader should understand both WHAT the code do
 {mermaid_constraints}
 """
 
+# ── 三智能体协作 Prompts ────────────────────────────────────────────────────
+
+PAGE_PLANNER_PROMPT = """Analyze the code and create a brief plan for this wiki page.
+
+Page: {page_title}
+Section: {section_title}
+Repository: {repo_name}
+
+<code_context>
+{code_context}
+</code_context>
+
+Output ONLY valid JSON (no markdown fences, no explanation):
+{{
+  "subsections": ["title1", "title2"],
+  "diagrams": [
+    {{"id": "DIAGRAM_1", "type": "flowchart|erDiagram|sequenceDiagram", "description": "what to show"}}
+  ],
+  "key_references": ["file_path:start_line-end_line"]
+}}
+
+Rules:
+- subsections: 3-6 items covering the page topic
+- diagrams: 0-2 diagrams (only if genuinely useful; omit for config/testing pages)
+- key_references: 3-8 most important code locations
+"""
+
+PAGE_DIAGRAM_PROMPT = """Generate ONLY the diagrams listed below. No prose, no explanations.
+
+Repository: {repo_name}
+Page: {page_title}
+
+<code_context>
+{code_context}
+</code_context>
+
+Diagrams to generate:
+{diagram_specs}
+
+For each diagram output EXACTLY (nothing else):
+[DIAGRAM_N]
+```diagram-spec
+{{...JSON...}}
+```
+"""
+
+PAGE_WRITER_PROMPT = """Write the prose content for this wiki page. Do NOT generate any diagrams.
+
+Page title: {page_title}
+Section: {section_title}
+Repository: {repo_name}
+
+Output language: {language}
+The entire page MUST be written in {language}.
+
+<code_context>
+{code_context}
+</code_context>
+
+Page outline:
+{outline_plan}
+
+Where a diagram should appear, write exactly [DIAGRAM_N] on its own line.
+The actual diagrams will be inserted automatically — do NOT write diagram-spec JSON.
+
+Write a COMPREHENSIVE Markdown page:
+1. **Code Citations (MANDATORY)**: Every function/class must cite `file_path:start_line-end_line`.
+2. **Module Relationships**: What does this module call? What calls it?
+3. **Implementation Details**: HOW it works, not just WHAT it does.
+4. **Code Snippets**: Representative code with syntax highlighting.
+5. **Configuration**: Important config options and environment variables.
+6. **Error Handling**: Fallbacks and resilience patterns.
+
+Use ## for main sections, ### for subsections.
+"""
+
 
 async def generate_wiki(
     db: AsyncSession,
@@ -166,6 +338,7 @@ async def generate_wiki(
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
+    cancel_checker: Optional[Callable] = None,
 ) -> str:
     """
     Wiki 生成主流程。
@@ -180,6 +353,8 @@ async def generate_wiki(
     logger.info(f"[WikiGenerator] 开始生成 Wiki: repo_id={repo_id} provider={llm_provider} model={model}")
 
     # ===== 阶段 1: 生成 Wiki 大纲 =====
+    if cancel_checker:
+        await cancel_checker()
     if progress_callback:
         await progress_callback(10, "正在生成 Wiki 大纲...")
 
@@ -243,6 +418,8 @@ async def generate_wiki(
                 pct = page_count / total_pages * 100
                 await progress_callback(pct, f"生成页面 ({page_count}/{total_pages}): {page_data['title']}")
 
+            if cancel_checker:
+                await cancel_checker()
             logger.info(f"[WikiGenerator] 生成页面: {page_data['title']}")
 
             code_context = await _retrieve_code_context(
@@ -263,10 +440,117 @@ async def generate_wiki(
                 order_index=page_data["order"],
             )
             db.add(page)
+            await db.commit()  # 每页提交一次，释放写锁，允许并发写入（如 DELETE）
 
-    await db.flush()
     logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id}")
     return wiki.id
+
+
+async def _plan_page(
+    adapter, model: str, page_data: dict,
+    section_title: str, repo_name: str, code_context: str,
+) -> dict:
+    """Agent 1：分析代码，输出页面规划（子章节、图表需求、关键引用）"""
+    messages = [
+        LLMMessage(role="user", content=PAGE_PLANNER_PROMPT.format(
+            page_title=page_data["title"],
+            section_title=section_title,
+            repo_name=repo_name,
+            code_context=code_context,
+        )),
+    ]
+    try:
+        resp = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.2)
+        raw = resp.content.strip()
+        raw = re.sub(r'^```\w*\s*\n?', '', raw)
+        raw = re.sub(r'\n?```\s*$', '', raw)
+        return _json.loads(raw)
+    except Exception as e:
+        logger.warning(f"[WikiGenerator] 页面规划失败，使用默认规划: {e}")
+        return {
+            "subsections": ["Overview", "Implementation", "Configuration"],
+            "diagrams": [{"id": "DIAGRAM_1", "type": "flowchart", "description": "Component relationships"}],
+            "key_references": [],
+        }
+
+
+async def _generate_diagrams_only(
+    adapter, model: str, page_data: dict,
+    repo_name: str, code_context: str, plan: dict,
+) -> str:
+    """Agent 2：专注生成图表（diagram-spec JSON 块），不输出任何正文"""
+    diagrams = plan.get("diagrams", [])
+    if not diagrams:
+        return ""
+    diagram_specs = "\n".join(
+        f"- {d['id']}: {d['type']} — {d['description']}" for d in diagrams
+    )
+    messages = [
+        LLMMessage(role="system", content=MERMAID_CONSTRAINT_PROMPT),
+        LLMMessage(role="user", content=PAGE_DIAGRAM_PROMPT.format(
+            repo_name=repo_name,
+            page_title=page_data["title"],
+            code_context=code_context,
+            diagram_specs=diagram_specs,
+        )),
+    ]
+    try:
+        resp = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.3)
+        return resp.content
+    except Exception as e:
+        logger.warning(f"[WikiGenerator] 图表生成失败: {e}")
+        return ""
+
+
+async def _generate_prose_only(
+    adapter, model: str, page_data: dict,
+    section_title: str, repo_name: str, code_context: str,
+    plan: dict, language: str,
+) -> str:
+    """Agent 3：专注生成正文（含 [DIAGRAM_N] 占位符），不输出任何图表"""
+    subsections = plan.get("subsections", [])
+    diagrams = plan.get("diagrams", [])
+    outline_plan = "Subsections to cover:\n" + "\n".join(f"- {s}" for s in subsections)
+    if diagrams:
+        outline_plan += "\n\nDiagram placeholders:\n" + "\n".join(
+            f"- Write [{d['id']}] where the {d['type']} diagram should appear" for d in diagrams
+        )
+    messages = [
+        LLMMessage(role="user", content=PAGE_WRITER_PROMPT.format(
+            page_title=page_data["title"],
+            section_title=section_title,
+            repo_name=repo_name,
+            code_context=code_context,
+            outline_plan=outline_plan,
+            language=language,
+        )),
+    ]
+    try:
+        resp = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.5)
+        return resp.content
+    except Exception as e:
+        logger.warning(f"[WikiGenerator] 正文生成失败: {e}")
+        return ""
+
+
+def _merge_diagrams_into_prose(prose: str, diagrams_raw: str) -> str:
+    """将 Agent 2 输出的图表块替换到 Agent 3 正文中的 [DIAGRAM_N] 占位符"""
+    if not diagrams_raw:
+        # 清理未被替换的占位符
+        return re.sub(r'\[DIAGRAM_\d+\]', '', prose)
+
+    diagram_map: dict = {}
+    pattern = re.compile(
+        r'\[DIAGRAM_(\d+)\]\s*\n(```diagram-spec\s*\n.*?\n```)',
+        re.DOTALL
+    )
+    for m in pattern.finditer(diagrams_raw):
+        diagram_map[f"[DIAGRAM_{m.group(1)}]"] = m.group(2)
+
+    result = prose
+    for placeholder, block in diagram_map.items():
+        result = result.replace(placeholder, block)
+    return re.sub(r'\[DIAGRAM_\d+\]', '', result)
 
 
 async def _generate_page_content(
@@ -274,35 +558,59 @@ async def _generate_page_content(
     section_title: str, repo_name: str, code_context: str,
     language: str = "Chinese",
 ) -> str:
-    """生成单页内容并校验 Mermaid"""
-    messages = [
-        LLMMessage(role="system", content=MERMAID_CONSTRAINT_PROMPT),
-        LLMMessage(role="user", content=PAGE_CONTENT_PROMPT.format(
-            page_title=page_data["title"],
-            section_title=section_title,
-            repo_name=repo_name,
-            code_context=code_context,
-            mermaid_constraints=MERMAID_CONSTRAINT_PROMPT,
-            language=language,
-        )),
-    ]
+    """
+    三智能体协作生成单页内容：
+      Agent 1 (Planner)  → 规划子章节与图表需求
+      Agent 2 (Diagram)  → 专注生成 diagram-spec JSON（并行）
+      Agent 3 (Writer)   → 专注生成正文，含 [DIAGRAM_N] 占位符（并行）
+    最后合并并经 diagram-spec → Mermaid → 校验自愈流水线处理。
+    """
+    # Agent 1：规划（串行，为后续两个 Agent 提供上下文）
+    plan = await _plan_page(adapter, model, page_data, section_title, repo_name, code_context)
+    logger.info(
+        f"[WikiGenerator] 页面规划完成: {page_data['title']} "
+        f"| 子章节={len(plan.get('subsections', []))} "
+        f"| 图表={len(plan.get('diagrams', []))}"
+    )
 
-    try:
-        response = await adapter.generate_with_rate_limit(
-            messages=messages, model=model, temperature=0.5,
-        )
-        content = response.content
-    except Exception as e:
-        if is_token_overflow(e):
-            logger.warning(f"[WikiGenerator] Token 溢出，启动降级策略: {page_data['title']}")
-            content = await generate_with_degradation(
-                adapter, model, page_data, section_title, repo_name,
-                code_context, PAGE_CONTENT_PROMPT, MERMAID_CONSTRAINT_PROMPT,
-            )
-        else:
-            raise
+    # Agents 2 & 3：并行执行
+    diagrams_raw, prose_raw = await asyncio.gather(
+        _generate_diagrams_only(adapter, model, page_data, repo_name, code_context, plan),
+        _generate_prose_only(adapter, model, page_data, section_title, repo_name, code_context, plan, language),
+    )
 
-    # Mermaid 校验与自愈
+    # 合并
+    content = _merge_diagrams_into_prose(prose_raw, diagrams_raw)
+
+    # 降级兜底：两个 Agent 都失败时回退到单 Agent
+    if not content.strip():
+        logger.warning(f"[WikiGenerator] 三智能体均失败，降级为单 Agent: {page_data['title']}")
+        messages = [
+            LLMMessage(role="system", content=MERMAID_CONSTRAINT_PROMPT),
+            LLMMessage(role="user", content=PAGE_CONTENT_PROMPT.format(
+                page_title=page_data["title"],
+                section_title=section_title,
+                repo_name=repo_name,
+                code_context=code_context,
+                mermaid_constraints=MERMAID_CONSTRAINT_PROMPT,
+                language=language,
+            )),
+        ]
+        try:
+            response = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.5)
+            content = response.content
+        except Exception as e:
+            if is_token_overflow(e):
+                content = await generate_with_degradation(
+                    adapter, model, page_data, section_title, repo_name,
+                    code_context, PAGE_CONTENT_PROMPT, MERMAID_CONSTRAINT_PROMPT,
+                )
+            else:
+                raise
+
+    # 后处理流水线
+    content = process_diagram_specs(content)
+    content = await retry_failed_diagram_specs(content, adapter, model)
     content = await validate_and_fix_mermaid(adapter, model, content)
     return content
 

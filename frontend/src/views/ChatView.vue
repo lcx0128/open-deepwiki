@@ -13,6 +13,16 @@ const props = defineProps<{ repoId: string; sessionId?: string }>()
 const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
+
+function generateId(): string {
+  if (typeof crypto !== 'undefined' && typeof (crypto as Crypto).randomUUID === 'function') {
+    return (crypto as Crypto).randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+  })
+}
 const messagesRef = ref<HTMLElement | null>(null)
 
 const suggestions = [
@@ -72,7 +82,7 @@ async function loadSession(sessionId: string) {
     chatStore.sessionId = sessionId
     for (const msg of data.messages) {
       chatStore.addMessage({
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: msg.role as 'user' | 'assistant',
         content: msg.content,
         timestamp: Date.now(),
@@ -101,7 +111,7 @@ function pushSessionToUrl(sid: string) {
 async function handleSend(query: string) {
   if (chatStore.isLoading) return
   chatStore.addMessage({
-    id: crypto.randomUUID(),
+    id: generateId(),
     role: 'user',
     content: query,
     timestamp: Date.now(),
@@ -117,7 +127,7 @@ async function handleSend(query: string) {
 
 async function startNormalChat(query: string) {
   chatStore.addMessage({
-    id: crypto.randomUUID(),
+    id: generateId(),
     role: 'assistant',
     content: '',
     timestamp: Date.now(),
@@ -153,7 +163,7 @@ async function startDeepResearch(query: string, originalQuery: string) {
   // 只有最终轮创建 assistant 气泡
   if (isFinalRound) {
     chatStore.addMessage({
-      id: crypto.randomUUID(),
+      id: generateId(),
       role: 'assistant',
       content: '',
       timestamp: Date.now(),

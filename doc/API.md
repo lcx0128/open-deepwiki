@@ -1,6 +1,6 @@
 # API 接口文档
 
-> **版本**: 1.5.0 | **最后更新**: 2026-02-26
+> **版本**: 1.6.0 | **最后更新**: 2026-02-28
 >
 > Base URL: `http://localhost:8000`
 
@@ -94,6 +94,7 @@ Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SS
             "name": "owner/repo",
             "platform": "github",
             "status": "ready",
+            "failed_at_stage": null,
             "last_synced_at": "2026-02-20T10:00:00Z",
             "created_at": "2026-02-19T08:00:00Z"
         }
@@ -187,6 +188,26 @@ Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SS
 
 ---
 
+### POST /api/repositories/{repo_id}/abort — 中止任务
+
+中止指定仓库的所有活跃任务，将任务状态设为 `interrupted`，仓库状态设为 `interrupted`。中止后可通过「重新处理」恢复。
+
+**成功响应 200**:
+```json
+{
+    "message": "已中止 1 个任务",
+    "repo_id": "uuid"
+}
+```
+
+**错误响应**:
+| 状态码 | 场景 |
+|--------|------|
+| 404 | 仓库不存在 |
+| 409 | 该仓库当前没有活跃任务 |
+
+---
+
 ### DELETE /api/repositories/{repo_id} — 删除仓库
 
 删除指定仓库及其全部关联数据，适用于任意阶段卡死或需要完整重建的场景。
@@ -267,7 +288,7 @@ data: {"status":"completed","progress_pct":100,"stage":"处理完成","wiki_id":
 
 **心跳**: 每秒发送 `: heartbeat` 注释行保持连接活跃。
 
-**终止条件**: 收到 `status` 为 `completed`、`failed` 或 `cancelled` 时自动关闭。
+**终止条件**: 收到 `status` 为 `completed`、`failed`、`cancelled` 或 `interrupted` 时自动关闭。
 
 **前端使用示例**:
 ```javascript
@@ -275,7 +296,7 @@ const es = new EventSource(`/api/tasks/${taskId}/stream`);
 es.onmessage = (event) => {
     const data = JSON.parse(event.data);
     console.log(data.status, data.progress_pct);
-    if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+    if (['completed', 'failed', 'cancelled', 'interrupted'].includes(data.status)) {
         es.close();
     }
 };
@@ -419,7 +440,8 @@ es.onmessage = (event) => {
 
 | 故障场景 | 现象 | 推荐操作 |
 |---------|------|---------|
-| 任务卡死（Celery 进程被强制终止） | 任务状态永久停在 `cloning`/`parsing`/`embedding`/`generating` | 删除仓库后重新提交 |
+| 任务卡死（Celery 进程被强制终止） | Worker 重启后任务自动置为 `interrupted` | 调用 reprocess 恢复 |
+| 需要立即中止正在运行的任务 | 任务运行中 | 调用 abort 端点 |
 | Wiki 内容需要更新（代码未变） | 已有 Wiki 但内容过时 | 调用 Wiki 重新生成接口 |
 | Wiki 内容错误，需完全重来 | Wiki 存在但内容质量差 | 删除 Wiki 后重新生成 |
 | LLM Key 失效后恢复 | 任务 `failed_at_stage="generating"` | 修复 Key 后调用 reprocess |

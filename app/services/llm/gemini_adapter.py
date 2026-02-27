@@ -4,6 +4,7 @@ Gemini 适配器说明：
 endpoint: https://generativelanguage.googleapis.com/v1beta/openai/
 需要 GOOGLE_API_KEY 作为 Bearer Token。
 """
+import asyncio
 import logging
 from typing import AsyncIterator, List, Optional
 
@@ -35,7 +36,7 @@ class GeminiAdapter(BaseLLMAdapter):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=30),
-        retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError)),
+        retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError, asyncio.TimeoutError)),
         before_sleep=lambda state: logger.warning(
             f"[GeminiAdapter] 重试第 {state.attempt_number} 次"
         ),
@@ -47,11 +48,13 @@ class GeminiAdapter(BaseLLMAdapter):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
-            temperature=temperature,
-            **({"max_tokens": max_tokens} if max_tokens else {}),
+        response = await self._call_with_timeout(
+            self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
+                temperature=temperature,
+                **({"max_tokens": max_tokens} if max_tokens else {}),
+            )
         )
         choice = response.choices[0]
         return LLMResponse(

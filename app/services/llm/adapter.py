@@ -1,8 +1,14 @@
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, List, Optional
 
 from app.schemas.llm import LLMMessage, LLMResponse
+
+logger = logging.getLogger(__name__)
+
+# 单次 LLM API 调用超时（秒），超时后触发重试
+LLM_CALL_TIMEOUT = 480  # 8 分钟
 
 
 class BaseLLMAdapter(ABC):
@@ -20,6 +26,16 @@ class BaseLLMAdapter(ABC):
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self._max_concurrent)
         return self._semaphore
+
+    async def _call_with_timeout(self, coro, timeout: float = LLM_CALL_TIMEOUT):
+        """包装 API 调用，超时后抛出 asyncio.TimeoutError 以触发重试"""
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[LLMAdapter] API 调用超时（{timeout:.0f}s），将触发重试"
+            )
+            raise
 
     @abstractmethod
     async def generate(

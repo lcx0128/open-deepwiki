@@ -35,9 +35,9 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=404, detail="任务不存在")
 
     # 如果任务已是终态，直接返回最终状态
-    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED):
         async def final_event():
-            stage = "已完成" if task.status == TaskStatus.COMPLETED else (task.error_msg or "已取消")
+            stage = "已完成" if task.status == TaskStatus.COMPLETED else (task.error_msg or "已取消/已中断")
             payload = {
                 "status": task.status.value,
                 "progress_pct": task.progress_pct,
@@ -56,14 +56,36 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
         await pubsub.subscribe(channel)
 
         try:
+            # 订阅之后再读一次 DB，避免订阅前任务已完成导致错过终态事件
+            from app.database import async_session_factory
+            from app.models.task import Task as TaskModel
+            async with async_session_factory() as fresh_db:
+                fresh_task = await fresh_db.get(TaskModel, task_id)
+            if fresh_task and fresh_task.status in (
+                TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED
+            ):
+                stage = "已完成" if fresh_task.status == TaskStatus.COMPLETED else (
+                    fresh_task.error_msg or "已取消"
+                )
+                payload = {
+                    "status": fresh_task.status.value,
+                    "progress_pct": fresh_task.progress_pct,
+                    "stage": stage,
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                return
+
             # 发送当前状态作为初始事件
+            # 使用 fresh_task（订阅后重读）作为初始事件，避免发送过期状态
+            initial_source = fresh_task if fresh_task else task
             initial = {
-                "status": task.status.value,
-                "progress_pct": task.progress_pct,
-                "stage": task.current_stage or "等待处理",
+                "status": initial_source.status.value,
+                "progress_pct": initial_source.progress_pct,
+                "stage": initial_source.current_stage or "等待处理",
             }
             yield f"data: {json.dumps(initial, ensure_ascii=False)}\n\n"
 
+            _last_db_poll = asyncio.get_event_loop().time()
             # 持续监听
             while True:
                 message = await pubsub.get_message(
@@ -78,12 +100,32 @@ async def stream_task_progress(task_id: str, db: AsyncSession = Depends(get_db))
                     # 检查是否为终态消息
                     try:
                         parsed = json.loads(data)
-                        if parsed.get("status") in ("completed", "failed", "cancelled"):
+                        if parsed.get("status") in ("completed", "failed", "cancelled", "interrupted"):
                             break
                     except json.JSONDecodeError:
                         pass
                 else:
-                    # 发送心跳保持连接
+                    # 无新消息时，每 3 秒做一次 DB 轮询作为兜底
+                    # 防止 Redis 消息丢失导致前端永久停留在旧状态
+                    now = asyncio.get_event_loop().time()
+                    if now - _last_db_poll >= 3.0:
+                        _last_db_poll = now
+                        try:
+                            async with async_session_factory() as poll_db:
+                                polled = await poll_db.get(TaskModel, task_id)
+                            if polled:
+                                poll_payload = {
+                                    "status": polled.status.value,
+                                    "progress_pct": polled.progress_pct,
+                                    "stage": polled.current_stage or "",
+                                }
+                                yield f"data: {json.dumps(poll_payload, ensure_ascii=False)}\n\n"
+                                if polled.status in (
+                                    TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED
+                                ):
+                                    break
+                        except Exception:
+                            pass
                     yield ": heartbeat\n\n"
                     await asyncio.sleep(1)
         finally:

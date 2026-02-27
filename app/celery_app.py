@@ -43,6 +43,53 @@ def setup_worker_logging(**kwargs):
 def on_worker_ready(**kwargs):
     logger = logging.getLogger("celery.worker")
     logger.info("[Worker] ✅ Worker 已就绪，开始监听任务队列")
+    # 标记所有未完成任务为 INTERRUPTED，禁止自动续传
+    import asyncio as _asyncio
+    try:
+        _asyncio.run(_mark_interrupted_tasks())
+    except Exception as e:
+        logger.warning(f"[Worker] 标记中断任务失败（已忽略）: {e}")
+
+
+async def _mark_interrupted_tasks():
+    """Worker 启动时将所有非终态任务标记为 INTERRUPTED，防止幽灵任务自动续传"""
+    import logging as _logging
+    _logger = _logging.getLogger("celery.worker")
+    try:
+        from app.database import async_session_factory
+        from app.models.task import Task, TaskStatus
+        from app.models.repository import Repository, RepoStatus
+        from sqlalchemy import select, not_
+
+        _TERMINAL = [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]
+
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(Task).where(not_(Task.status.in_(_TERMINAL)))
+            )
+            tasks = result.scalars().all()
+            if not tasks:
+                _logger.info("[Worker] 无未完成任务，无需标记中断")
+                return
+
+            repo_ids = list({t.repo_id for t in tasks})
+            for task in tasks:
+                task.status = TaskStatus.INTERRUPTED
+                task.error_msg = "Worker 重启，任务被中断。请点击「重新处理」恢复。"
+            # 同步将对应仓库状态设为 INTERRUPTED
+            repos_result = await db.execute(
+                select(Repository).where(Repository.id.in_(repo_ids))
+            )
+            for repo in repos_result.scalars().all():
+                if repo.status not in (RepoStatus.READY, RepoStatus.ERROR):
+                    repo.status = RepoStatus.INTERRUPTED
+            await db.commit()
+            _logger.warning(
+                f"[Worker] 已将 {len(tasks)} 个未完成任务标记为 INTERRUPTED，"
+                f"涉及仓库: {repo_ids}"
+            )
+    except Exception as e:
+        _logging.getLogger("celery.worker").error(f"[Worker] _mark_interrupted_tasks 异常: {e}", exc_info=True)
 
 
 @task_prerun.connect
