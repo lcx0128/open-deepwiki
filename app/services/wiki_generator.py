@@ -24,26 +24,38 @@ logger = logging.getLogger(__name__)
 # Mermaid 约束 System Prompt
 # ============================================================
 MERMAID_CONSTRAINT_PROMPT = """
-When generating Mermaid diagrams, you MUST follow these rules strictly:
+When generating Mermaid diagrams, you MUST follow these rules strictly to prevent parsing errors:
 
-1. Flow/architecture diagrams: ALWAYS use `graph TD` (top-down). NEVER use `graph LR`.
+1. Flow/architecture diagrams: 
+   - ALWAYS use `flowchart TD` (top-down). NEVER use `graph LR` or `graph TD`.
+   - If using `subgraph`, you MUST properly close it with `end`.
+
 2. Sequence diagrams:
-   - Start with `sequenceDiagram` on its own line
-   - Synchronous call: `A->>B: message`
-   - Async return: `B-->>A: response`
-   - Async fire-and-forget: `A-)B: event`
-   - Activation: `A->>+B: request` (activate B), `B-->>-A: response` (deactivate B)
+   - Start with `sequenceDiagram` on its own line.
+   - ALWAYS declare participants first using aliases (e.g., `participant A as 客户端`).
+   - Sync call: `A->>B: message` | Async return: `B-->>A: response`
+   - Activation: `A->>+B: request`, `B-->>-A: response`
+
 3. ER diagrams:
-   - Use `erDiagram` keyword
-   - Cardinality: `||--o{` (one-to-many), `||--||` (one-to-one), `}o--o{` (many-to-many)
-4. NEVER use HTML tags inside Mermaid nodes
-5. NEVER use special characters (parentheses, quotes) in node labels without quoting
-6. Keep node labels short (max 30 characters)
-7. Maximum 20 nodes per diagram to prevent overflow
-8. Node IDs MUST be ASCII-only (letters, numbers, underscores). Chinese/non-ASCII text MUST only appear inside label brackets [].
-   CORRECT: `A[客户端] --> B[API网关] --> C[服务层]`
-   WRONG:   `客户端 --> API网关 --> 服务层`  (Chinese as node IDs — causes parse errors in Mermaid 10.x)
-   WRONG:   `客户端[Client] --> API网关[Gateway]`  (Chinese in node IDs even with labels)
+   - Use `erDiagram` keyword.
+   - Cardinality: `||--o{` (1:N), `||--||` (1:1), `}o--o{` (M:N).
+
+4. LABEL TEXT SAFETY (CRITICAL):
+   - NEVER use HTML tags.
+   - ALL node labels MUST be wrapped in double quotes. 
+     CORRECT: `A["User (Client)"]` or `B["数据库"]`
+     WRONG: `A[User (Client)]` or `B[数据库]`
+   - NEVER use double quotes inside the label text itself.
+
+5. NODE ID SAFETY (CRITICAL):
+   - Node IDs MUST be ASCII-only (letters, numbers, underscores). 
+   - Chinese/non-ASCII text MUST ONLY appear inside the quoted label brackets.
+     CORRECT: `A["客户端"] --> B["API网关"]`
+     WRONG:   `客户端 --> API网关` (Chinese as Node IDs will crash the parser)
+
+6. Keep diagrams clean:
+   - Max 30 characters per label.
+   - Max 20 nodes per diagram.
 """
 
 WIKI_OUTLINE_PROMPT = """You are a technical documentation expert. Analyze this code repository and create a COMPREHENSIVE, DETAILED wiki structure with 6-10 sections.
