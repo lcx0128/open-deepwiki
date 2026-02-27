@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import type { TaskState } from '@/stores/task'
 import { submitRepository, getTaskStatus } from '@/api/repositories'
 import { useTaskStore } from '@/stores/task'
 import { useEventSource } from '@/composables/useEventSource'
 import ProgressBar from '@/components/ProgressBar.vue'
 
 const taskStore = useTaskStore()
-const { connectSSE } = useEventSource()
+const { connectSSE, closeSSE } = useEventSource()
 
 // 表单字段
 const repoUrl = ref('')
@@ -20,49 +21,69 @@ const showAdvanced = ref(false)
 
 // 功能特性数据
 const features = [
-  {
-    icon: '🔍',
-    title: '深度语义解析',
-    desc: '基于 Tree-sitter AST 解析，理解函数、类、模块间的真实依赖关系',
-  },
-  {
-    icon: '📖',
-    title: '结构化 Wiki 文档',
-    desc: '自动生成多层级文档，包含架构图（Mermaid）、代码引用和关键路径分析',
-  },
-  {
-    icon: '💬',
-    title: 'AI 代码问答',
-    desc: '基于 RAG 的多轮对话，精准回答代码相关问题并附带源码引用',
-  },
-  {
-    icon: '⚡',
-    title: '增量同步',
-    desc: '基于 git diff 的智能增量更新，仅处理变更文件，高效快速',
-  },
+  { icon: '🔍', title: '深度语义解析', desc: '基于 Tree-sitter AST 解析，理解函数、类、模块间的真实依赖关系' },
+  { icon: '📖', title: '结构化 Wiki 文档', desc: '自动生成多层级文档，包含架构图（Mermaid）、代码引用和关键路径分析' },
+  { icon: '💬', title: 'AI 代码问答', desc: '基于 RAG 的多轮对话，精准回答代码相关问题并附带源码引用' },
+  { icon: '⚡', title: '增量同步', desc: '基于 git diff 的智能增量更新，仅处理变更文件，高效快速' },
 ]
 
-// 是否处于进度展示模式
-const hasTask = computed(() => taskStore.currentTask !== null)
-const isCompleted = computed(() => taskStore.currentTask?.status === 'completed')
-const isFailed = computed(() => taskStore.currentTask?.status === 'failed')
-const isIncremental = computed(() => taskStore.currentTask?.type === 'incremental_sync')
-const taskTitle = computed(() => {
-  if (isCompleted.value) {
-    return isIncremental.value ? '增量更新完成' : 'Wiki 生成完成'
-  }
-  if (isFailed.value) return '处理失败'
-  return isIncremental.value ? '正在增量更新仓库...' : '正在处理仓库...'
-})
+const TERMINAL = ['completed', 'failed', 'cancelled', 'interrupted']
 
-// 页面挂载：从 URL 或 localStorage 恢复任务状态
+// 每个任务的进度详情展开状态
+const showProgress = ref<Record<string, boolean>>({})
+
+const hasTasks = computed(() => taskStore.activeTasks.length > 0)
+
+// 每个任务的辅助函数
+function taskTitle(t: TaskState): string {
+  const inc = t.type === 'incremental_sync'
+  if (t.status === 'completed') return inc ? '增量更新完成' : 'Wiki 生成完成'
+  if (t.status === 'failed') return '处理失败'
+  if (t.status === 'cancelled') return '任务已中止'
+  if (t.status === 'interrupted') return '任务已中断'
+  return inc ? '正在增量更新仓库...' : '正在处理仓库...'
+}
+
+function bannerMod(t: TaskState): string {
+  if (t.status === 'completed') return 'done'
+  if (t.status === 'failed') return 'failed'
+  if (t.status === 'cancelled' || t.status === 'interrupted') return 'stopped'
+  return 'running'
+}
+
+function isTerminal(t: TaskState): boolean {
+  return TERMINAL.includes(t.status)
+}
+
+function toggleProgress(taskId: string) {
+  showProgress.value[taskId] = !showProgress.value[taskId]
+}
+
+function dismissTask(taskId: string) {
+  closeSSE(taskId)
+  taskStore.clearTask(taskId)
+  delete showProgress.value[taskId]
+}
+
+// 页面挂载：从 localStorage 恢复所有活跃任务
 onMounted(async () => {
-  const params = new URLSearchParams(window.location.search)
-  const existingTaskId = params.get('taskId') || localStorage.getItem('activeTaskId')
+  let ids: string[] = []
 
-  if (existingTaskId) {
+  const stored = localStorage.getItem('activeTaskIds')
+  if (stored) {
+    try { ids = JSON.parse(stored) } catch { /* ignore */ }
+  }
+  // 向后兼容：单任务 ID
+  if (ids.length === 0) {
+    const params = new URLSearchParams(window.location.search)
+    const single = params.get('taskId') || localStorage.getItem('activeTaskId')
+    if (single) ids = [single]
+  }
+
+  const validIds: string[] = []
+  await Promise.all(ids.map(async (taskId) => {
     try {
-      const task = await getTaskStatus(existingTaskId)
+      const task = await getTaskStatus(taskId)
       taskStore.setTask({
         id: task.id,
         repoId: task.repo_id,
@@ -75,20 +96,21 @@ onMounted(async () => {
         errorMsg: task.error_msg,
         wikiId: null,
       })
-      // 同步 URL，方便分享
-      if (!params.get('taskId')) {
-        history.replaceState(null, '', `${window.location.pathname}?taskId=${existingTaskId}`)
-      }
-      // 若任务仍在进行中，重连 SSE
-      if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status)) {
-        connectSSE(existingTaskId)
-      }
-    } catch {
-      // 任务不存在，清除缓存
+      validIds.push(taskId)
+      if (!TERMINAL.includes(task.status)) connectSSE(taskId)
+    } catch { /* 任务不存在，跳过 */ }
+  }))
+
+  // 清理失效的 ID
+  if (validIds.length !== ids.length) {
+    if (validIds.length > 0) {
+      localStorage.setItem('activeTaskIds', JSON.stringify(validIds))
+    } else {
+      localStorage.removeItem('activeTaskIds')
       localStorage.removeItem('activeTaskId')
-      history.replaceState(null, '', window.location.pathname)
     }
   }
+  history.replaceState(null, '', window.location.pathname)
 })
 
 // 提交仓库
@@ -106,7 +128,6 @@ async function handleSubmit() {
       llm_model: llmModel.value || undefined,
     })
 
-    // 初始化任务状态
     taskStore.setTask({
       id: result.task_id,
       repoId: result.repo_id,
@@ -120,15 +141,9 @@ async function handleSubmit() {
       wikiId: null,
     })
 
-    // 静默重写 URL（不触发 Vue Router 导航）
-    history.pushState(
-      { taskId: result.task_id },
-      '',
-      `${window.location.pathname}?taskId=${result.task_id}`
-    )
-
-    // 连接 SSE
     connectSSE(result.task_id)
+    showProgress.value[result.task_id] = true
+    repoUrl.value = ''
 
   } catch (err: unknown) {
     const error = err as { response?: { status?: number; data?: { detail?: unknown } } }
@@ -136,10 +151,7 @@ async function handleSubmit() {
       submitError.value = '该仓库正在处理中，请稍后再试'
       const detail = error.response.data?.detail as { existing_task_id?: string } | undefined
       const existingTaskId = detail?.existing_task_id
-      if (existingTaskId) {
-        history.pushState(null, '', `?taskId=${existingTaskId}`)
-        connectSSE(existingTaskId)
-      }
+      if (existingTaskId) connectSSE(existingTaskId)
     } else if (error.response?.status === 400) {
       const detail = error.response.data?.detail
       submitError.value = (typeof detail === 'string' ? detail : null) || 'URL 格式无效，请检查后重试'
@@ -150,19 +162,12 @@ async function handleSubmit() {
     isSubmitting.value = false
   }
 }
-
-// 重置，提交新任务
-function resetAndSubmitNew() {
-  taskStore.clearTask()
-  repoUrl.value = ''
-  history.replaceState(null, '', window.location.pathname)
-}
 </script>
 
 <template>
   <div class="home-view">
-    <!-- 未提交状态：显示提交表单 -->
-    <div v-if="!hasTask" class="home-form-container">
+    <!-- 首页表单（始终显示） -->
+    <div class="home-form-container">
       <!-- Hero 区域 -->
       <div class="hero">
         <h1 class="hero__title">Open DeepWiki</h1>
@@ -256,6 +261,41 @@ function resetAndSubmitNew() {
         </div>
       </div>
 
+      <!-- 任务列表横幅（每个活跃任务一行） -->
+      <div v-if="hasTasks" class="task-banners">
+        <div
+          v-for="task in taskStore.activeTasks"
+          :key="task.id"
+          class="task-banner"
+          :class="`task-banner--${bannerMod(task)}`"
+        >
+          <div class="task-banner__left">
+            <svg v-if="!isTerminal(task)" class="task-banner__icon task-banner__icon--spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke-linecap="round"/></svg>
+            <svg v-else-if="task.status === 'completed'" class="task-banner__icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+            <svg v-else-if="task.status === 'failed'" class="task-banner__icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+            <svg v-else class="task-banner__icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+            <div class="task-banner__info">
+              <span class="task-banner__title">{{ taskTitle(task) }}</span>
+              <span class="task-banner__sub">{{ task.currentStage || '等待中...' }}</span>
+            </div>
+          </div>
+          <div class="task-banner__right">
+            <span class="task-banner__pct">{{ Math.round(task.progressPct) }}%</span>
+            <RouterLink
+              v-if="task.status === 'completed' && task.repoId"
+              :to="{ name: 'wiki', params: { repoId: task.repoId } }"
+              class="btn btn-primary btn-sm"
+            >查看 Wiki</RouterLink>
+            <button class="btn btn-secondary btn-sm" @click="toggleProgress(task.id)">
+              {{ showProgress[task.id] ? '收起' : '详情' }}
+            </button>
+            <button class="btn btn-ghost btn-sm" @click="dismissTask(task.id)" title="清除">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M4 4l8 8M12 4l-8 8" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- 功能特性展示 -->
       <div class="features">
         <div class="feature-card" v-for="f in features" :key="f.title">
@@ -266,60 +306,52 @@ function resetAndSubmitNew() {
       </div>
     </div>
 
-    <!-- 任务进行中/完成状态：显示进度 -->
-    <div v-else class="task-container">
-      <div class="task-header">
-        <h2 class="task-title">
-          <span v-if="isCompleted" class="task-title__status task-title__status--done">
-            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
-            {{ isIncremental ? '增量更新完成' : 'Wiki 生成完成' }}
-          </span>
-          <span v-else-if="isFailed" class="task-title__status task-title__status--failed">
-            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
-            处理失败
-          </span>
-          <span v-else class="task-title__status task-title__status--running">
-            <svg class="task-title__spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke-linecap="round"/></svg>
-            {{ isIncremental ? '正在增量更新仓库...' : '正在处理仓库...' }}
-          </span>
-        </h2>
-        <div class="task-actions">
-          <button class="btn btn-secondary btn-sm" @click="resetAndSubmitNew">
-            提交新仓库
-          </button>
-          <RouterLink
-            v-if="isCompleted && taskStore.currentTask?.repoId"
-            :to="{ name: 'wiki', params: { repoId: taskStore.currentTask.repoId } }"
-            class="btn btn-primary"
-          >
-            查看 Wiki
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-left:4px;vertical-align:-1px"><path d="M3 8h10M9 4l4 4-4 4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </RouterLink>
+    <!-- 进度详情（每个任务独立展开） -->
+    <template v-for="task in taskStore.activeTasks" :key="task.id">
+      <div v-if="showProgress[task.id]" class="task-container">
+        <div class="task-header">
+          <h2 class="task-title">
+            <span :class="`task-title__status task-title__status--${bannerMod(task) === 'running' ? 'running' : bannerMod(task) === 'done' ? 'done' : bannerMod(task) === 'failed' ? 'failed' : 'stopped'}`">
+              <svg v-if="bannerMod(task) === 'running'" class="task-title__spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke-linecap="round"/></svg>
+              <svg v-else-if="bannerMod(task) === 'done'" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+              <svg v-else-if="bannerMod(task) === 'failed'" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+              <svg v-else viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+              {{ taskTitle(task) }}
+            </span>
+          </h2>
+          <div class="task-actions">
+            <RouterLink
+              v-if="task.status === 'completed' && task.repoId"
+              :to="{ name: 'wiki', params: { repoId: task.repoId } }"
+              class="btn btn-primary btn-sm"
+            >
+              查看 Wiki
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-left:4px;vertical-align:-1px"><path d="M3 8h10M9 4l4 4-4 4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </RouterLink>
+          </div>
+        </div>
+
+        <ProgressBar
+          :status="task.status"
+          :progress-pct="task.progressPct"
+          :current-stage="task.currentStage"
+          :files-processed="task.filesProcessed"
+          :files-total="task.filesTotal"
+          :error-msg="task.errorMsg"
+        />
+
+        <div class="task-info">
+          <div class="info-item">
+            <span class="info-label">任务 ID</span>
+            <code class="info-value">{{ task.id }}</code>
+          </div>
+          <div class="info-item">
+            <span class="info-label">仓库 ID</span>
+            <code class="info-value">{{ task.repoId }}</code>
+          </div>
         </div>
       </div>
-
-      <!-- 进度条 -->
-      <ProgressBar
-        :status="taskStore.currentTask!.status"
-        :progress-pct="taskStore.currentTask!.progressPct"
-        :current-stage="taskStore.currentTask!.currentStage"
-        :files-processed="taskStore.currentTask!.filesProcessed"
-        :files-total="taskStore.currentTask!.filesTotal"
-        :error-msg="taskStore.currentTask!.errorMsg"
-      />
-
-      <!-- 任务信息 -->
-      <div class="task-info">
-        <div class="info-item">
-          <span class="info-label">任务 ID</span>
-          <code class="info-value">{{ taskStore.currentTask!.id }}</code>
-        </div>
-        <div class="info-item">
-          <span class="info-label">仓库 ID</span>
-          <code class="info-value">{{ taskStore.currentTask!.repoId }}</code>
-        </div>
-      </div>
-    </div>
+    </template>
   </div>
 </template>
 
@@ -468,6 +500,124 @@ function resetAndSubmitNew() {
   line-height: 1.6;
 }
 
+/* ── Task banner ──────────────────────────────────── */
+.task-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.task-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color);
+  flex-wrap: wrap;
+}
+
+.task-banner--running {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.task-banner--done {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+.task-banner--failed {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+.task-banner--stopped {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+[data-theme="dark"] .task-banner--running { background: rgba(37,99,235,0.1); border-color: rgba(37,99,235,0.3); }
+[data-theme="dark"] .task-banner--done { background: rgba(16,185,129,0.1); border-color: rgba(16,185,129,0.3); }
+[data-theme="dark"] .task-banner--failed { background: rgba(239,68,68,0.1); border-color: rgba(239,68,68,0.3); }
+[data-theme="dark"] .task-banner--stopped { background: rgba(245,158,11,0.1); border-color: rgba(245,158,11,0.3); }
+
+.task-banner__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-banner__icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.task-banner--running .task-banner__icon { color: #2563eb; }
+.task-banner--done .task-banner__icon { color: #059669; }
+.task-banner--failed .task-banner__icon { color: #dc2626; }
+.task-banner--stopped .task-banner__icon { color: #d97706; }
+
+.task-banner__icon--spin {
+  animation: spin 1.4s linear infinite;
+}
+
+.task-banner__info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.task-banner__title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-banner__sub {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-banner__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.task-banner__pct {
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  color: var(--text-secondary);
+  min-width: 36px;
+  text-align: right;
+}
+
+.btn-ghost {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.15s;
+}
+.btn-ghost:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
 /* ── Task container ───────────────────────────────── */
 .task-container {
   max-width: 700px;
@@ -503,6 +653,7 @@ function resetAndSubmitNew() {
 
 .task-title__status--done { color: #059669; }
 .task-title__status--failed { color: #dc2626; }
+.task-title__status--stopped { color: #d97706; }
 .task-title__status--running { color: var(--text-primary); }
 
 .task-title__spin {
