@@ -5,6 +5,7 @@ DashScope 适配器关键约束：
 3. temperature 最大为 1.0
 4. base_url 默认为 https://dashscope.aliyuncs.com/compatible-mode/v1
 """
+import asyncio
 import logging
 from typing import AsyncIterator, List, Optional
 
@@ -37,7 +38,7 @@ class DashScopeAdapter(BaseLLMAdapter):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=30),
-        retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError)),
+        retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError, asyncio.TimeoutError)),
         before_sleep=lambda state: logger.warning(
             f"[DashScopeAdapter] 重试第 {state.attempt_number} 次"
         ),
@@ -51,11 +52,13 @@ class DashScopeAdapter(BaseLLMAdapter):
     ) -> LLMResponse:
         # DashScope 部分模型不支持 temperature > 1.0
         temperature = min(temperature, 1.0)
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
-            temperature=temperature,
-            **({"max_tokens": max_tokens} if max_tokens else {}),
+        response = await self._call_with_timeout(
+            self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
+                temperature=temperature,
+                **({"max_tokens": max_tokens} if max_tokens else {}),
+            )
         )
         choice = response.choices[0]
         return LLMResponse(

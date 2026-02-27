@@ -4,6 +4,7 @@
 - Ollama (http://localhost:11434/v1)
 - vLLM, LM Studio, LocalAI 等
 """
+import asyncio
 import logging
 from typing import AsyncIterator, List, Optional
 
@@ -32,11 +33,13 @@ class CustomAdapter(BaseLLMAdapter):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
-            temperature=temperature,
-            **({"max_tokens": max_tokens} if max_tokens else {}),
+        response = await self._call_with_timeout(
+            self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
+                temperature=temperature,
+                **({"max_tokens": max_tokens} if max_tokens else {}),
+            )
         )
         choice = response.choices[0]
         return LLMResponse(
