@@ -86,6 +86,24 @@ graph TD
 
 Rule: Keep node labels under 30 characters. Abbreviate long names.
 """,
+
+    "erDiagram中文": """\
+## Example: erDiagram Chinese relationship labels must use double quotes
+
+WRONG (causes 'Expecting ALPHANUM got 中'):
+erDiagram
+    Project ||--o{ Wiki : 拥有
+    User ||--o{ Task : 创建
+    Repository ||--|{ FileState : 包含
+
+CORRECT (wrap Chinese labels in double quotes):
+erDiagram
+    Project ||--o{ Wiki : "拥有"
+    User ||--o{ Task : "创建"
+    Repository ||--|{ FileState : "包含"
+
+Rule: In erDiagram, any relationship label after the colon (:) that contains Chinese or non-ASCII characters MUST be wrapped in double quotes "". ASCII-only labels do not need quotes.
+""",
 }
 
 
@@ -112,6 +130,9 @@ def _build_fix_messages(block: str, errors: List[str]) -> Tuple[str, str]:
         selected.append(_FIX_EXAMPLES["括号"])
     if "过长" in error_text:
         selected.append(_FIX_EXAMPLES["标签过长"])
+    if "erDiagram" in error_text or ("中文" in error_text and "双引号" in error_text):
+        if "erDiagram中文" in _FIX_EXAMPLES:
+            selected.append(_FIX_EXAMPLES["erDiagram中文"])
 
     examples_section = ("\n".join(selected) + "\n---\n\n") if selected else ""
 
@@ -134,6 +155,8 @@ MERMAID_RULES = [
     (re.compile(r'\([^)]{50,}\)'), "节点标签过长（超过50字符）"),
     # 排除合法的激活(+)和去激活(-)修饰符，以及节点标识符（单词字符）
     (re.compile(r'-->>(?![+\-\w])[^:\s]'), "箭头后缺少空格或冒号"),
+    # erDiagram 中文关系标签未加双引号（冒号后直接跟中文，未用引号包裹）
+    (re.compile(r':\s+(?!")[\u4e00-\u9fff\u3400-\u4dbf]'), "erDiagram/关系图中中文标签必须用双引号包裹，例：: 拥有 → : \"拥有\""),
 ]
 
 # 不包含 {} ：erDiagram 使用 ||--o{ 这类不对称的花括号表示基数，无需匹配

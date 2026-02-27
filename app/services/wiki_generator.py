@@ -24,26 +24,86 @@ logger = logging.getLogger(__name__)
 # Mermaid 约束 System Prompt
 # ============================================================
 MERMAID_CONSTRAINT_PROMPT = """
-When generating Mermaid diagrams, you MUST follow these rules strictly:
+=== CRITICAL MERMAID SYNTAX RULES — MUST FOLLOW ALL OR DIAGRAM WILL BREAK ===
 
-1. Flow/architecture diagrams: ALWAYS use `graph TD` (top-down). NEVER use `graph LR`.
-2. Sequence diagrams:
-   - Start with `sequenceDiagram` on its own line
-   - Synchronous call: `A->>B: message`
-   - Async return: `B-->>A: response`
-   - Async fire-and-forget: `A-)B: event`
-   - Activation: `A->>+B: request` (activate B), `B-->>-A: response` (deactivate B)
-3. ER diagrams:
-   - Use `erDiagram` keyword
-   - Cardinality: `||--o{` (one-to-many), `||--||` (one-to-one), `}o--o{` (many-to-many)
-4. NEVER use HTML tags inside Mermaid nodes
-5. NEVER use special characters (parentheses, quotes) in node labels without quoting
-6. Keep node labels short (max 30 characters)
-7. Maximum 20 nodes per diagram to prevent overflow
-8. Node IDs MUST be ASCII-only (letters, numbers, underscores). Chinese/non-ASCII text MUST only appear inside label brackets [].
-   CORRECT: `A[客户端] --> B[API网关] --> C[服务层]`
-   WRONG:   `客户端 --> API网关 --> 服务层`  (Chinese as node IDs — causes parse errors in Mermaid 10.x)
-   WRONG:   `客户端[Client] --> API网关[Gateway]`  (Chinese in node IDs even with labels)
+━━━ RULE 1: FLOW DIAGRAMS — ALWAYS `graph TD`, NEVER `graph LR` ━━━
+WRONG:   graph LR
+         A[Start] --> B[End]
+CORRECT: graph TD
+         A[Start] --> B[End]
+
+━━━ RULE 2: NODE IDs MUST BE ASCII-ONLY (CRITICAL for Mermaid 10.x) ━━━
+Chinese/Japanese/Korean text MUST only appear INSIDE square-bracket [ ] labels.
+Node IDs (the part before [ ]) MUST be ASCII letters, numbers, or underscores only.
+
+WRONG (causes "Syntax error in text"):
+    客户端 --> API网关 --> 服务层
+    客户端[Client] --> API网关[Gateway]
+
+CORRECT:
+    A[客户端] --> B[API网关] --> C[服务层]
+    Client[客户端] --> Gateway[API网关]
+
+WRONG:
+    用户请求[用户请求] --> 路由层[路由层]
+CORRECT:
+    UserReq[用户请求] --> Router[路由层]
+
+━━━ RULE 3: erDiagram — CHINESE LABELS MUST USE DOUBLE QUOTES ━━━
+In erDiagram, relationship labels after the colon that contain Chinese MUST be wrapped in double quotes.
+
+WRONG (causes 'Expecting ALPHANUM got 中'):
+    Project ||--o{ Wiki : 拥有
+    User ||--o{ Task : 创建
+
+CORRECT:
+    Project ||--o{ Wiki : "拥有"
+    User ||--o{ Task : "创建"
+
+━━━ RULE 4: SEQUENCE DIAGRAMS ━━━
+    - First line: sequenceDiagram (on its own line, no other text)
+    - Synchronous call:  A->>B: message
+    - Async return:      B-->>A: response
+    - Activation:        A->>+B: request  then  B-->>-A: response
+    - Note:              Note over A,B: message text
+
+━━━ RULE 5: NO HTML TAGS INSIDE NODES ━━━
+WRONG:   A[<b>Title</b>] or A[<br/>line]
+CORRECT: A[Title]
+
+━━━ RULE 6: SPECIAL CHARACTERS IN LABELS NEED QUOTING ━━━
+Parentheses, angle brackets, pipes, or colons inside labels must use double-quoted form.
+
+WRONG:   A[Function(args)] --> B[key:value]
+CORRECT: A["Function(args)"] --> B["key:value"]
+
+━━━ RULE 7: KEEP NODE LABELS SHORT — MAX 30 CHARACTERS ━━━
+WRONG:   A[这是一个描述非常详细超过三十个字符的服务组件名称]
+CORRECT: A[详细服务组件]
+
+━━━ RULE 8: MAXIMUM 20 NODES PER DIAGRAM ━━━
+Split large diagrams into multiple smaller focused ones.
+
+━━━ RULE 9: NO UNMATCHED BRACKETS ━━━
+Every [ must have ], every ( must have ).
+WRONG:   A[客户端 --> B[API]
+CORRECT: A[客户端] --> B[API]
+
+━━━ RULE 10: NO SEMICOLONS AS LINE SEPARATORS ━━━
+Each relationship/statement must be on its own line, not separated by semicolons.
+WRONG:   A --> B; B --> C
+CORRECT:
+    A --> B
+    B --> C
+
+=== PRE-GENERATION CHECKLIST (verify before outputting each diagram) ===
+□ All node IDs are ASCII-only? (no Chinese/Japanese/Korean characters as node IDs)
+□ Using graph TD (not graph LR)?
+□ All erDiagram Chinese relationship labels wrapped in "double quotes"?
+□ All brackets are matched ([ matched with ], ( matched with ))?
+□ All node labels are under 30 characters?
+□ Fewer than 20 nodes total?
+□ No HTML tags inside node labels?
 """
 
 WIKI_OUTLINE_PROMPT = """You are a technical documentation expert. Analyze this code repository and create a COMPREHENSIVE, DETAILED wiki structure with 6-10 sections.

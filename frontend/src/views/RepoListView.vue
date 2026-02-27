@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getRepositories, deleteRepository, reprocessRepository, syncRepository } from '@/api/repositories'
+import { regenerateWiki } from '@/api/wiki'
 import { useRepoStore } from '@/stores/repo'
 import { useTaskStore } from '@/stores/task'
 import { useEventSource } from '@/composables/useEventSource'
@@ -79,6 +80,42 @@ async function handleReprocess(repo: RepositoryItem) {
   } finally {
     actionLoading.value = null
   }
+}
+
+async function handleRegenerate(repo: RepositoryItem) {
+  actionLoading.value = repo.id
+  try {
+    const result = await regenerateWiki(repo.id)
+    taskStore.setTask({
+      id: result.task_id,
+      repoId: repo.id,
+      type: 'wiki_regenerate',
+      status: 'pending',
+      progressPct: 0,
+      currentStage: 'Wiki 重新生成已开始...',
+      filesTotal: 0,
+      filesProcessed: 0,
+      errorMsg: null,
+      wikiId: null,
+    })
+    connectSSE(result.task_id)
+    repoStore.updateRepoStatus(repo.id, 'generating' as RepositoryItem['status'])
+    router.push({ path: '/', query: { taskId: result.task_id } })
+  } catch {
+    repoStore.error = '重新生成 Wiki 失败'
+  } finally {
+    actionLoading.value = null
+  }
+}
+
+function stageLabel(stage: string | null | undefined): string {
+  const map: Record<string, string> = {
+    cloning: '克隆',
+    parsing: '解析',
+    embedding: '向量化',
+    generating: 'Wiki生成',
+  }
+  return stage ? (map[stage] || stage) : ''
 }
 
 async function handleSync(repo: RepositoryItem) {
@@ -238,6 +275,10 @@ onMounted(loadRepos)
             <h3 class="repo-card__name">{{ repo.name }}</h3>
           </div>
           <StatusBadge :status="repo.status" />
+          <span
+            v-if="repo.status === 'error' && repo.failed_at_stage"
+            class="failed-stage-hint"
+          >{{ stageLabel(repo.failed_at_stage) }}失败</span>
         </div>
 
         <p class="repo-card__url">{{ repo.url }}</p>
@@ -272,6 +313,13 @@ onMounted(loadRepos)
             增量更新
           </button>
           <button
+            v-if="repo.status === 'error' && repo.failed_at_stage === 'generating'"
+            class="btn btn-secondary btn-sm"
+            :disabled="actionLoading === repo.id"
+            @click="handleRegenerate(repo)"
+          >重新生成 Wiki</button>
+          <button
+            v-if="!(repo.status === 'error' && repo.failed_at_stage)"
             class="btn btn-secondary btn-sm"
             :disabled="actionLoading === repo.id || ['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing'].includes(repo.status)"
             @click="handleReprocess(repo)"
@@ -558,6 +606,13 @@ onMounted(loadRepos)
 .btn-danger-ghost:hover:not(:disabled) {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.failed-stage-hint {
+  font-size: var(--font-size-xs);
+  color: #ef4444;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* ── Delete modal ─────────────────────────────────── */

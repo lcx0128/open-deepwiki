@@ -94,6 +94,7 @@ Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SS
             "name": "owner/repo",
             "platform": "github",
             "status": "ready",
+            "failed_at_stage": null,
             "last_synced_at": "2026-02-20T10:00:00Z",
             "created_at": "2026-02-19T08:00:00Z"
         }

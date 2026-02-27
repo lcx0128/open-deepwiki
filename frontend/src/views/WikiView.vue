@@ -5,6 +5,7 @@ import { getWiki, regenerateWiki, deleteWiki } from '@/api/wiki'
 import { deleteRepository } from '@/api/repositories'
 import { useWikiStore } from '@/stores/wiki'
 import { useTaskStore } from '@/stores/task'
+import { useRepoStore } from '@/stores/repo'
 import { useEventSource } from '@/composables/useEventSource'
 import WikiSidebar from '@/components/WikiSidebar.vue'
 import MarkdownView from '@/components/MarkdownView.vue'
@@ -13,7 +14,30 @@ const props = defineProps<{ repoId: string }>()
 const router = useRouter()
 const wikiStore = useWikiStore()
 const taskStore = useTaskStore()
+const repoStore = useRepoStore()
 const { connectSSE } = useEventSource()
+
+const currentRepo = computed(() => repoStore.repos.find(r => r.id === props.repoId))
+
+const canRegenerate = computed(() => {
+  if (currentRepo.value) {
+    const { status, failed_at_stage } = currentRepo.value
+    if (status === 'error' && failed_at_stage && failed_at_stage !== 'generating') {
+      return false
+    }
+  }
+  return true
+})
+
+function stageLabel(stage: string | null | undefined): string {
+  const map: Record<string, string> = {
+    cloning: '克隆',
+    parsing: '代码解析',
+    embedding: '向量化',
+    generating: 'Wiki生成',
+  }
+  return stage ? (map[stage] || stage) : '未知'
+}
 
 const isLoading = ref(false)
 const error = ref('')
@@ -214,11 +238,17 @@ watch(() => wikiStore.activePageId, () => {
       <!-- Error state -->
       <div v-else-if="error && !wikiStore.wiki" class="wiki-error">
         <div class="alert alert-error">{{ error }}</div>
+        <div v-if="!canRegenerate" class="wiki-error-hint">
+          仓库在 <strong>{{ stageLabel(currentRepo?.failed_at_stage) }}</strong> 阶段失败，向量数据不完整，无法生成 Wiki。请前往仓库列表重新处理该仓库。
+        </div>
         <div class="wiki-error-actions">
-          <RouterLink :to="{ name: 'home' }" class="btn btn-primary">
-            返回首页
-          </RouterLink>
-          <button class="btn btn-secondary" @click="handleRegenerate" :disabled="isRegenerating">
+          <RouterLink :to="{ name: 'home' }" class="btn btn-primary">返回仓库列表</RouterLink>
+          <button
+            v-if="canRegenerate"
+            class="btn btn-secondary"
+            @click="handleRegenerate"
+            :disabled="isRegenerating"
+          >
             重新生成 Wiki
           </button>
         </div>
@@ -425,6 +455,11 @@ watch(() => wikiStore.activePageId, () => {
 
 .wiki-error { align-items: flex-start; max-width: 600px; margin: 40px auto; }
 .wiki-error-actions { display: flex; gap: 10px; }
+.wiki-error-hint {
+  margin: 0.75rem 0;
+  color: var(--color-text-secondary, #888);
+  font-size: 0.875rem;
+}
 
 /* Toolbar */
 .wiki-toolbar {

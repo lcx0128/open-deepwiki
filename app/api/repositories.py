@@ -147,8 +147,30 @@ async def list_repositories(
     result = await db.execute(query)
     repos = result.scalars().all()
 
+    # 获取各仓库最新失败任务的 failed_at_stage
+    repo_ids = [r.id for r in repos]
+    failed_at_stage_map: dict[str, Optional[str]] = {}
+    if repo_ids:
+        # 查询每个仓库最新的 FAILED 任务（按 created_at 倒序，取第一条）
+        failed_tasks_result = await db.execute(
+            select(Task.repo_id, Task.failed_at_stage)
+            .where(
+                Task.repo_id.in_(repo_ids),
+                Task.status == TaskStatus.FAILED,
+            )
+            .order_by(Task.created_at.desc())
+        )
+        for row in failed_tasks_result.all():
+            if row.repo_id not in failed_at_stage_map:
+                failed_at_stage_map[row.repo_id] = row.failed_at_stage
+
+    def _build_list_item(r) -> RepositoryListItem:
+        item = RepositoryListItem.model_validate(r)
+        item.failed_at_stage = failed_at_stage_map.get(r.id)
+        return item
+
     return RepositoryListResponse(
-        items=[RepositoryListItem.model_validate(r) for r in repos],
+        items=[_build_list_item(r) for r in repos],
         total=total,
         page=page,
         per_page=per_page,

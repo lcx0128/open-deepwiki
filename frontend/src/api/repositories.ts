@@ -23,6 +23,7 @@ export interface RepositoryItem {
   status: 'pending' | 'cloning' | 'ready' | 'error' | 'syncing'
   last_synced_at: string | null
   created_at: string
+  failed_at_stage?: string | null
 }
 
 export interface RepositoryListResponse {
