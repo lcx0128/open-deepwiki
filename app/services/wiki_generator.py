@@ -221,6 +221,7 @@ async def generate_wiki(
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
+    cancel_checker: Optional[Callable] = None,
 ) -> str:
     """
     Wiki 生成主流程。
@@ -235,6 +236,8 @@ async def generate_wiki(
     logger.info(f"[WikiGenerator] 开始生成 Wiki: repo_id={repo_id} provider={llm_provider} model={model}")
 
     # ===== 阶段 1: 生成 Wiki 大纲 =====
+    if cancel_checker:
+        await cancel_checker()
     if progress_callback:
         await progress_callback(10, "正在生成 Wiki 大纲...")
 
@@ -298,6 +301,8 @@ async def generate_wiki(
                 pct = page_count / total_pages * 100
                 await progress_callback(pct, f"生成页面 ({page_count}/{total_pages}): {page_data['title']}")
 
+            if cancel_checker:
+                await cancel_checker()
             logger.info(f"[WikiGenerator] 生成页面: {page_data['title']}")
 
             code_context = await _retrieve_code_context(

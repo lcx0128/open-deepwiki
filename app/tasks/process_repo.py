@@ -115,9 +115,15 @@ async def _run_task(
                             await _update_task(db, task_id, TaskStatus.GENERATING, actual_pct, msg)
                             await _publish(task_id, "generating", actual_pct, msg)
 
+                        async def _wiki_regen_cancel():
+                            from app.core.redis_client import check_cancel_flag
+                            if await check_cancel_flag(task_id):
+                                raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
+
                         wiki_id = await generate_wiki(
                             db, repo_id, llm_provider, llm_model,
                             progress_callback=_wiki_regen_progress,
+                            cancel_checker=_wiki_regen_cancel,
                         )
                     except NotImplementedError:
                         pass
@@ -290,9 +296,15 @@ async def _run_task(
                         await _update_task(db, task_id, TaskStatus.GENERATING, actual_pct, msg)
                         await _publish(task_id, "generating", actual_pct, msg)
 
+                    async def _wiki_cancel():
+                        from app.core.redis_client import check_cancel_flag
+                        if await check_cancel_flag(task_id):
+                            raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
+
                     wiki_id = await generate_wiki(
                         db, repo_id, llm_provider, llm_model,
                         progress_callback=_wiki_progress,
+                        cancel_checker=_wiki_cancel,
                     )
                 except NotImplementedError:
                     pass
