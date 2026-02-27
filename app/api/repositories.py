@@ -331,23 +331,39 @@ async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
     if not repo:
         raise HTTPException(status_code=404, detail="仓库不存在")
 
-    # 1. 撤销所有活跃 Celery 任务（含卡死的中间状态任务）
+    # 1. 撤销所有活跃 Celery 任务
+    # 优先通过 Redis 标志通知 worker 取消（无需 DB 写权限，避免写锁竞争）
     active_result = await db.execute(
         select(Task).where(
             Task.repo_id == repo_id,
             ~Task.status.in_([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]),
         )
     )
-    for task in active_result.scalars().all():
-        if task.celery_task_id:
+    active_tasks = active_result.scalars().all()
+    if active_tasks:
+        from app.core.redis_client import set_cancel_flag
+        for task in active_tasks:
+            # 设置 Redis 取消标志（立即生效，worker 下次检查时会感知）
             try:
-                from app.celery_app import celery_app
-                # terminate=False：仅将任务标记为已撤销，worker 拾取时自动丢弃。
-                # 不使用 terminate=True，因为 --pool=solo 无子进程，
-                # terminate 会对 worker 主进程发送 SIGTERM，导致 worker 崩溃。
-                celery_app.control.revoke(task.celery_task_id, terminate=False)
+                await set_cancel_flag(task.id)
             except Exception:
-                pass  # broker 不可达时忽略，DB 级联删除仍会清理记录
+                pass
+            if task.celery_task_id:
+                try:
+                    from app.celery_app import celery_app
+                    celery_app.control.revoke(task.celery_task_id, terminate=False)
+                except Exception:
+                    pass
+        # 尝试将 DB 状态设为 CANCELLED（可能因 worker 持有写锁而失败，Redis 标志已足够）
+        try:
+            for task in active_tasks:
+                task.status = TaskStatus.CANCELLED
+            await db.commit()
+        except Exception:
+            await db.rollback()
+        # 等待 worker 检测到取消标志并在下次页面提交时释放写锁
+        import asyncio as _asyncio
+        await _asyncio.sleep(2.0)
 
     local_path = repo.local_path
 

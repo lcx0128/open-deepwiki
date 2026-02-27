@@ -318,8 +318,8 @@ async def generate_wiki(
                 order_index=page_data["order"],
             )
             db.add(page)
+            await db.commit()  # 每页提交一次，释放写锁，允许并发写入（如 DELETE）
 
-    await db.flush()
     logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id}")
     return wiki.id
 

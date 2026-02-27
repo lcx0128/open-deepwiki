@@ -38,3 +38,21 @@ async def publish_progress(task_id: str, data: dict) -> None:
     redis = await get_redis()
     channel = f"task_progress:{task_id}"
     await redis.publish(channel, json.dumps(data, ensure_ascii=False))
+
+
+async def set_cancel_flag(task_id: str, ttl: int = 3600) -> None:
+    """设置任务取消标志（Redis Key，TTL 1小时），无需 DB 写权限"""
+    redis = await get_redis()
+    await redis.set(f"cancel:{task_id}", "1", ex=ttl)
+
+
+async def check_cancel_flag(task_id: str) -> bool:
+    """检查任务是否被标记为取消（Redis Key）"""
+    redis = await get_redis()
+    return bool(await redis.exists(f"cancel:{task_id}"))
+
+
+async def clear_cancel_flag(task_id: str) -> None:
+    """清除任务取消标志"""
+    redis = await get_redis()
+    await redis.delete(f"cancel:{task_id}")
