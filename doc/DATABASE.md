@@ -1,6 +1,6 @@
 # 数据库设计文档
 
-> **版本**: 1.0.0 | **最后更新**: 2026-02-20
+> **版本**: 1.1.0 | **最后更新**: 2026-02-28
 
 本文档描述 Open-DeepWiki 系统的关系型数据库 Schema，采用 SQLAlchemy 2.0 ORM + Alembic 迁移管理。
 
@@ -30,7 +30,7 @@
 | `platform` | ENUM | NOT NULL, DEFAULT 'github' | 代码托管平台：github/gitlab/bitbucket/custom |
 | `default_branch` | VARCHAR(128) | DEFAULT 'main' | 默认分支名称，用于增量同步的目标分支 |
 | `local_path` | VARCHAR(1024) | NULLABLE | 本地克隆路径，克隆完成后填入 |
-| `status` | ENUM | NOT NULL, DEFAULT 'pending' | 仓库状态机：pending/cloning/ready/error/syncing |
+| `status` | ENUM | NOT NULL, DEFAULT 'pending' | 仓库状态机：pending/cloning/ready/error/syncing/interrupted |
 | `last_synced_at` | DATETIME | NULLABLE | 最后同步时间戳，首次克隆前为 NULL |
 | `created_at` | DATETIME | NOT NULL | 记录创建时间，自动填充 |
 | `updated_at` | DATETIME | NOT NULL | 记录最后更新时间，写入时自动更新 |
@@ -39,8 +39,11 @@
 ```
 PENDING → CLONING → READY
                   ↘ ERROR
+                  ↘ INTERRUPTED（Worker 异常重启）
          READY → SYNCING → READY
                           ↘ ERROR
+                          ↘ INTERRUPTED
+任意状态 → INTERRUPTED（POST /api/repositories/{id}/abort）
 ```
 
 **索引**:
@@ -73,7 +76,8 @@ PENDING → CLONING → READY
 PENDING → CLONING → PARSING → EMBEDDING → GENERATING → COMPLETED
     ↓         ↓         ↓          ↓            ↓
   FAILED   FAILED    FAILED     FAILED       FAILED
-PENDING → CANCELLED（用户主动取消）
+任意非终态 → CANCELLED（用户主动取消）
+任意非终态 → INTERRUPTED（Worker 异常重启 / POST abort）
 ```
 
 **索引**:
@@ -234,3 +238,4 @@ repositories (1) ──── (N) tasks
 | 001 | `20260220_001_initial_schema.py` | 初始表结构（repositories, tasks, file_states） |
 | 002 | `20260221_002_add_failed_at_stage.py` | tasks 表新增 failed_at_stage 字段 |
 | 003 | `20260221_003_add_wiki_tables.py` | 新增 Wiki 文档表（wikis, wiki_sections, wiki_pages） |
+| 004 | `20260227_004_add_interrupted_status.py` | repositories 和 tasks 的 status ENUM 新增 interrupted 值 |
