@@ -162,6 +162,17 @@ npm run dev
 | v0.3.0 | RAG 检索层 + MCP Server + 增量同步 + Docker 部署 | ✅ 已完成 |
 | v1.0.0 | 正式发布（GA） | 规划中 |
 
+## 贡献者
+
+感谢以下贡献者对本项目的支持：
+
+| 贡献者 | 贡献内容 |
+|---|---|
+| [ModCx](https://github.com/lcx0128) | 项目发起者与主要开发者 |
+| [LeNotFound](https://github.com/LeNotFound) | 重写 Mermaid 生成规则 Prompt（PR #4） |
+
+欢迎提交 Issue 和 Pull Request！
+
 ## 许可证
 
 [MIT](LICENSE)
