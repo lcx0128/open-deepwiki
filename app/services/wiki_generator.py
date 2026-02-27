@@ -26,84 +26,91 @@ logger = logging.getLogger(__name__)
 MERMAID_CONSTRAINT_PROMPT = """
 === CRITICAL MERMAID SYNTAX RULES — MUST FOLLOW ALL OR DIAGRAM WILL BREAK ===
 
-━━━ RULE 1: FLOW DIAGRAMS — ALWAYS `graph TD`, NEVER `graph LR` ━━━
+━━━ RULE 1: FLOW DIAGRAMS — ALWAYS `flowchart TD`, NEVER `graph LR` / `graph TD` ━━━
 WRONG:   graph LR
-         A[Start] --> B[End]
-CORRECT: graph TD
-         A[Start] --> B[End]
+         A["Start"] --> B["End"]
+WRONG:   graph TD
+         A["Start"] --> B["End"]
+CORRECT: flowchart TD
+         A["Start"] --> B["End"]
+         subgraph Layer["层级"]
+             C["服务"]
+         end
 
 ━━━ RULE 2: NODE IDs MUST BE ASCII-ONLY (CRITICAL for Mermaid 10.x) ━━━
-Chinese/Japanese/Korean text MUST only appear INSIDE square-bracket [ ] labels.
-Node IDs (the part before [ ]) MUST be ASCII letters, numbers, or underscores only.
+Node IDs (before [ ]) MUST be ASCII letters, numbers, or underscores only.
+Chinese/non-ASCII text MUST ONLY appear INSIDE double-quoted label brackets.
 
 WRONG (causes "Syntax error in text"):
     客户端 --> API网关 --> 服务层
     客户端[Client] --> API网关[Gateway]
 
 CORRECT:
-    A[客户端] --> B[API网关] --> C[服务层]
-    Client[客户端] --> Gateway[API网关]
+    A["客户端"] --> B["API网关"] --> C["服务层"]
+    Client["客户端"] --> Gateway["API网关"]
 
-WRONG:
-    用户请求[用户请求] --> 路由层[路由层]
-CORRECT:
-    UserReq[用户请求] --> Router[路由层]
+━━━ RULE 3: ALL NODE LABELS MUST USE DOUBLE QUOTES (CRITICAL) ━━━
+Every node label MUST be wrapped in double quotes to prevent special-character parse errors.
+NEVER put double quotes inside the label text itself.
 
-━━━ RULE 3: erDiagram — CHINESE LABELS MUST USE DOUBLE QUOTES ━━━
-In erDiagram, relationship labels after the colon that contain Chinese MUST be wrapped in double quotes.
+WRONG:   A[客户端] --> B[API网关]
+WRONG:   A[Function(args)] --> B[key:value]
+CORRECT: A["客户端"] --> B["API网关"]
+CORRECT: A["Function args"] --> B["key value"]
+
+━━━ RULE 4: erDiagram — CHINESE LABELS MUST USE DOUBLE QUOTES ━━━
+In erDiagram, relationship labels after the colon that contain Chinese MUST be in double quotes.
 
 WRONG (causes 'Expecting ALPHANUM got 中'):
     Project ||--o{ Wiki : 拥有
-    User ||--o{ Task : 创建
-
 CORRECT:
     Project ||--o{ Wiki : "拥有"
     User ||--o{ Task : "创建"
 
-━━━ RULE 4: SEQUENCE DIAGRAMS ━━━
-    - First line: sequenceDiagram (on its own line, no other text)
-    - Synchronous call:  A->>B: message
-    - Async return:      B-->>A: response
-    - Activation:        A->>+B: request  then  B-->>-A: response
-    - Note:              Note over A,B: message text
+━━━ RULE 5: SEQUENCE DIAGRAMS ━━━
+    - First line: sequenceDiagram (on its own line)
+    - ALWAYS declare participants first with aliases:
+        participant A as 客户端
+        participant B as API网关
+    - Sync call:   A->>B: message
+    - Async return: B-->>A: response
+    - Activation:  A->>+B: request  then  B-->>-A: response
+    - Note:        Note over A,B: message text
 
-━━━ RULE 5: NO HTML TAGS INSIDE NODES ━━━
-WRONG:   A[<b>Title</b>] or A[<br/>line]
-CORRECT: A[Title]
-
-━━━ RULE 6: SPECIAL CHARACTERS IN LABELS NEED QUOTING ━━━
-Parentheses, angle brackets, pipes, or colons inside labels must use double-quoted form.
-
-WRONG:   A[Function(args)] --> B[key:value]
-CORRECT: A["Function(args)"] --> B["key:value"]
+━━━ RULE 6: NO HTML TAGS INSIDE NODES ━━━
+WRONG:   A["<b>Title</b>"] or A["<br/>line"]
+CORRECT: A["Title"]
 
 ━━━ RULE 7: KEEP NODE LABELS SHORT — MAX 30 CHARACTERS ━━━
-WRONG:   A[这是一个描述非常详细超过三十个字符的服务组件名称]
-CORRECT: A[详细服务组件]
+WRONG:   A["这是一个描述非常详细超过三十个字符的服务组件名称"]
+CORRECT: A["详细服务组件"]
 
 ━━━ RULE 8: MAXIMUM 20 NODES PER DIAGRAM ━━━
 Split large diagrams into multiple smaller focused ones.
 
 ━━━ RULE 9: NO UNMATCHED BRACKETS ━━━
 Every [ must have ], every ( must have ).
-WRONG:   A[客户端 --> B[API]
-CORRECT: A[客户端] --> B[API]
+WRONG:   A["客户端 --> B["API"]
+CORRECT: A["客户端"] --> B["API"]
 
 ━━━ RULE 10: NO SEMICOLONS AS LINE SEPARATORS ━━━
-Each relationship/statement must be on its own line, not separated by semicolons.
+Each statement must be on its own line.
 WRONG:   A --> B; B --> C
 CORRECT:
     A --> B
     B --> C
 
 === PRE-GENERATION CHECKLIST (verify before outputting each diagram) ===
-□ All node IDs are ASCII-only? (no Chinese/Japanese/Korean characters as node IDs)
-□ Using graph TD (not graph LR)?
-□ All erDiagram Chinese relationship labels wrapped in "double quotes"?
-□ All brackets are matched ([ matched with ], ( matched with ))?
-□ All node labels are under 30 characters?
+□ Using flowchart TD (not graph TD, not graph LR)?
+□ All node IDs are ASCII-only? (no Chinese as node IDs)
+□ All node labels wrapped in double quotes?
+□ All erDiagram Chinese relationship labels wrapped in double quotes?
+□ All brackets matched?
+□ All node labels under 30 characters?
 □ Fewer than 20 nodes total?
 □ No HTML tags inside node labels?
+□ Sequence diagrams declare participants first?
+□ All subgraphs closed with `end`?
 """
 
 WIKI_OUTLINE_PROMPT = """You are a technical documentation expert. Analyze this code repository and create a COMPREHENSIVE, DETAILED wiki structure with 6-10 sections.
