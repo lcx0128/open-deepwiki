@@ -1,6 +1,7 @@
 # app/services/two_stage_retriever.py
 import logging
 import os
+import re
 from typing import List
 
 from app.services.embedder import get_collection, embed_query
@@ -56,6 +57,58 @@ async def stage1_discovery(
                 description=first_line,
                 relevance_score=max(0.0, 1.0 - float(distance)),  # 距离转相似度
             ))
+
+    # --- Keyword-based symbol lookup (hybrid search) ---
+    COMMON_WORDS = {
+        "the", "and", "for", "with", "that", "this", "from", "have", "will",
+        "what", "how", "can", "are", "was", "but", "not", "you", "all",
+        "been", "has", "had", "its", "into", "than", "then", "them",
+        "who", "did", "get", "may", "new", "one", "our", "out", "say",
+    }
+    try:
+        # Extract code identifiers: CamelCase, snake_case (≥3 chars), ALL_CAPS
+        raw_symbols = re.findall(
+            r'\b([A-Z][A-Za-z0-9]{2,}|[a-z][a-z0-9_]{2,}(?:_[a-z0-9]+)+|[A-Z][A-Z0-9_]{2,})\b',
+            query,
+        )
+        symbols = [s for s in raw_symbols if s.lower() not in COMMON_WORDS]
+
+        if symbols and collection.count() > 0:
+            keyword_results = collection.get(
+                where={"name": {"$in": symbols[:20]}},
+                include=["metadatas", "documents", "ids"],
+            )
+
+            existing_ids = {g.chunk_id for g in guidelines}
+            if keyword_results["ids"]:
+                for i, chunk_id in enumerate(keyword_results["ids"]):
+                    if chunk_id in existing_ids:
+                        continue
+                    metadata = keyword_results["metadatas"][i] if keyword_results["metadatas"] else {}
+                    doc = keyword_results["documents"][i] if keyword_results["documents"] else ""
+                    first_line = doc.split("\n")[0][:100] if doc else ""
+                    guidelines.append(CodeGuideline(
+                        chunk_id=chunk_id,
+                        name=metadata.get("name", ""),
+                        file_path=metadata.get("file_path", ""),
+                        node_type=metadata.get("node_type", ""),
+                        start_line=int(metadata.get("start_line", 0)),
+                        end_line=int(metadata.get("end_line", 0)),
+                        description=first_line,
+                        relevance_score=0.85,
+                    ))
+                    existing_ids.add(chunk_id)
+
+            # Cap total results and sort by relevance descending
+            guidelines = sorted(guidelines, key=lambda g: g.relevance_score, reverse=True)
+            guidelines = guidelines[:top_k * 2]
+
+            logger.debug(
+                f"[Stage1] keyword symbols={symbols[:5]}, keyword_hits="
+                f"{len(keyword_results['ids']) if keyword_results['ids'] else 0}"
+            )
+    except Exception as exc:
+        logger.warning(f"[Stage1] keyword lookup failed (non-fatal): {exc}")
 
     logger.debug(f"[Stage1] repo={repo_id}, query='{query[:50]}', found={len(guidelines)}")
     return guidelines
