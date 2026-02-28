@@ -1,6 +1,6 @@
 # API 接口文档
 
-> **版本**: 1.6.0 | **最后更新**: 2026-02-28
+> **版本**: 1.7.0 | **最后更新**: 2026-03-01
 >
 > Base URL: `http://localhost:8000`
 
@@ -188,6 +188,42 @@ Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SS
 
 ---
 
+### GET /api/repositories/{repo_id}/pending-commits — 查看待同步提交
+
+查询远端仓库中尚未同步到本地的 git 提交列表。执行 `git fetch` + `git log HEAD..origin/{branch}`，**不创建任务、不修改任何数据**，仅只读查询。用于在增量同步弹窗中展示"本次将同步哪些提交"。
+
+**路径参数**:
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `repo_id` | string | 仓库 UUID |
+
+**成功响应 200**:
+```json
+{
+    "repo_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "branch": "develop",
+    "count": 3,
+    "commits": [
+        {
+            "hash": "b8eb434a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f",
+            "short_hash": "b8eb434",
+            "message": "feat(frontend): 对话导出为 Markdown 功能",
+            "author": "Alice",
+            "date": "2026-02-28"
+        }
+    ]
+}
+```
+
+**错误响应**:
+| 状态码 | 场景 |
+|--------|------|
+| 400 | 仓库尚未克隆（`local_path` 为空） |
+| 404 | 仓库不存在 |
+| 504 | git fetch 超时（>60s） |
+
+---
+
 ### POST /api/repositories/{repo_id}/abort — 中止任务
 
 中止指定仓库的所有活跃任务，将任务状态设为 `interrupted`，仓库状态设为 `interrupted`。中止后可通过「重新处理」恢复。
@@ -286,6 +322,14 @@ data: {"status":"generating","progress_pct":85,"stage":"生成 Wiki: 核心模�
 data: {"status":"completed","progress_pct":100,"stage":"处理完成","wiki_id":"w-xxx","timestamp":"2026-02-20T10:33:00Z"}
 ```
 
+`completed` 事件的可选附加字段（仅增量同步时可能出现）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `wiki_id` | string | 已生成/更新的 Wiki ID |
+| `skipped_pages` | integer | 增量更新时跳过（未变更）的页面数 |
+| `wiki_regen_suggestion` | string | 当脏页比例 > 65% 时出现，建议前端提示用户触发全量重新生成 |
+
 **心跳**: 每秒发送 `: heartbeat` 注释行保持连接活跃。
 
 **终止条件**: 收到 `status` 为 `completed`、`failed`、`cancelled` 或 `interrupted` 时自动关闭。
@@ -356,7 +400,7 @@ es.onmessage = (event) => {
 
 ### POST /api/wiki/{repo_id}/regenerate — 重新生成 Wiki
 
-触发指定仓库的 Wiki 重新生成任务，返回 task_id 供 SSE 跟踪进度。
+触发指定仓库的 Wiki 重新生成任务，返回 task_id 供 SSE 跟踪进度。支持全量重新生成（重建大纲和所有页面）或选择性重新生成（仅更新指定页面的 `content_md`，不改动大纲和其他页面）。
 
 **路径参数**:
 
@@ -378,7 +422,7 @@ es.onmessage = (event) => {
 |------|------|------|------|
 | `llm_provider` | string | 否 | LLM 供应商，不填则使用环境变量默认值 |
 | `llm_model` | string | 否 | 模型名称 |
-| `pages` | array | 否 | 仅重新生成指定页面 ID 列表（预留，当前全量重生成） |
+| `pages` | array | 否 | 指定页面 ID 列表。**有值**时仅重新生成这些页面（选择性模式）；**不传或为 null** 时全量重新生成整个 Wiki |
 
 **成功响应 (201)**:
 

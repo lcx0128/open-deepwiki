@@ -10,6 +10,7 @@ import { useEventSource } from '@/composables/useEventSource'
 import WikiSidebar from '@/components/WikiSidebar.vue'
 import MarkdownView from '@/components/MarkdownView.vue'
 import WikiSearch from '@/components/WikiSearch.vue'
+import WikiRegenerateDialog from '@/components/WikiRegenerateDialog.vue'
 
 const props = defineProps<{ repoId: string }>()
 const router = useRouter()
@@ -43,6 +44,7 @@ function stageLabel(stage: string | null | undefined): string {
 const isLoading = ref(false)
 const error = ref('')
 const isRegenerating = ref(false)
+const showRegenerateDialog = ref(false)
 const showDeleteConfirm = ref(false)
 const showDeleteRepoConfirm = ref(false)
 const chatQuery = ref('')
@@ -134,17 +136,25 @@ async function loadWiki() {
   }
 }
 
-async function handleRegenerate() {
+function handleRegenerate() {
+  showRegenerateDialog.value = true
+}
+
+async function handleRegenerateConfirm(payload: { mode: 'full' | 'partial'; pageIds: string[] }) {
+  showRegenerateDialog.value = false
   isRegenerating.value = true
   try {
-    const result = await regenerateWiki(props.repoId)
+    const requestData = payload.mode === 'partial'
+      ? { pages: payload.pageIds }
+      : {}
+    const result = await regenerateWiki(props.repoId, requestData)
     taskStore.setTask({
       id: result.task_id,
       repoId: props.repoId,
       type: 'wiki_regenerate',
       status: 'pending',
       progressPct: 0,
-      currentStage: 'Wiki 重新生成已开始...',
+      currentStage: payload.mode === 'partial' ? `重新生成 ${payload.pageIds.length} 个页面...` : 'Wiki 重新生成已开始...',
       filesTotal: 0,
       filesProcessed: 0,
       errorMsg: null,
@@ -351,13 +361,14 @@ watch(() => wikiStore.activePageId, async () => {
               class="toolbar-btn"
               @click="handleRegenerate"
               :disabled="isRegenerating"
-              title="重新生成 Wiki"
+              title="重新生成 Wiki（支持全量或选择性）"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="23 4 23 10 17 10"/>
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
               </svg>
               <span>重新生成</span>
+              <span class="toolbar-btn__hint">全量/部分</span>
             </button>
             <button
               class="toolbar-btn"
@@ -470,6 +481,15 @@ watch(() => wikiStore.activePageId, async () => {
     <WikiSearch
       v-model="showSearch"
       @navigate="handleSearchNavigate"
+    />
+
+    <!-- Regenerate Wiki dialog -->
+    <WikiRegenerateDialog
+      v-if="showRegenerateDialog"
+      :wiki="wikiStore.wiki"
+      v-model:visible="showRegenerateDialog"
+      @confirm="handleRegenerateConfirm"
+      @cancel="showRegenerateDialog = false"
     />
 
     <!-- Delete Wiki modal -->
@@ -618,6 +638,13 @@ watch(() => wikiStore.activePageId, async () => {
   color: var(--text-muted);
   transition: all 0.15s;
   white-space: nowrap;
+}
+
+.toolbar-btn__hint {
+  font-size: 10px;
+  color: var(--text-muted, #94a3b8);
+  line-height: 1;
+  margin-top: 1px;
 }
 .toolbar-btn svg { width: 14px; height: 14px; }
 .toolbar-btn:hover {

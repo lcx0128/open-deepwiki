@@ -341,10 +341,10 @@ async def generate_wiki(
     llm_model: Optional[str] = None,
     progress_callback: Optional[Callable] = None,
     cancel_checker: Optional[Callable] = None,
-) -> str:
+) -> dict:
     """
     Wiki 生成主流程。
-    返回: wiki_id
+    返回: {"wiki_id": str, "total_pages": int, "skipped_pages": int}
     """
     from app.config import settings
     adapter = create_adapter(llm_provider)
@@ -400,7 +400,7 @@ async def generate_wiki(
     if total_pages == 0:
         logger.warning("[WikiGenerator] 大纲中无任何页面，跳过内容生成")
         await db.flush()
-        return wiki.id
+        return {"wiki_id": wiki.id, "total_pages": 0, "skipped_pages": 0}
 
     logger.info(
         f"[WikiGenerator] 开始生成页面内容: 共 {total_pages} 页"
@@ -442,6 +442,7 @@ async def generate_wiki(
     # 2b: 串行写入 DB（保持 AsyncSession 单协程使用，避免并发冲突）
     section_map: Dict[str, WikiSection] = {}
     page_count = 0
+    skipped_count = 0
 
     for (s_data, p_data), result in zip(task_meta, results):
         section_title = s_data["title"]
@@ -461,6 +462,7 @@ async def generate_wiki(
             logger.error(
                 f"[WikiGenerator] 页面生成失败，跳过: {p_data['title']} — {result}"
             )
+            skipped_count += 1
             continue
 
         _, _, content = result
@@ -479,8 +481,113 @@ async def generate_wiki(
             await progress_callback(pct, f"写入页面 ({page_count}/{total_pages}): {p_data['title']}")
         await db.commit()  # 每页提交一次，释放写锁，允许并发写入（如 DELETE）
 
-    logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id}")
-    return wiki.id
+    if skipped_count:
+        logger.warning(
+            f"[WikiGenerator] Wiki 生成完成（含跳过页）: wiki_id={wiki.id} "
+            f"成功={page_count} 跳过={skipped_count} 共={total_pages}"
+        )
+    else:
+        logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id} 共={total_pages} 页")
+    return {"wiki_id": wiki.id, "total_pages": total_pages, "skipped_pages": skipped_count}
+
+
+async def regenerate_specific_pages(
+    db: AsyncSession,
+    repo_id: str,
+    page_ids: List[str],
+    llm_provider: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    progress_callback: Optional[Callable] = None,
+    cancel_checker: Optional[Callable] = None,
+) -> dict:
+    """
+    选择性重新生成指定页面。
+    只更新 content_md，不重新生成大纲或触碰其他页面。
+    返回: {"wiki_id": str, "total_pages": int, "skipped_pages": int}
+    """
+    from app.config import settings
+    from app.models.wiki import Wiki, WikiSection, WikiPage
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    adapter = create_adapter(llm_provider)
+    model = llm_model or settings.DEFAULT_LLM_MODEL
+    language = settings.WIKI_LANGUAGE
+    collection = get_collection(repo_id)
+
+    logger.info(f"[WikiGenerator] 选择性重新生成 {len(page_ids)} 个页面: repo_id={repo_id}")
+
+    # 1. 加载 Wiki（获取 wiki_id 和 repo_name）
+    result = await db.execute(
+        select(Wiki).where(Wiki.repo_id == repo_id).order_by(Wiki.created_at.desc()).limit(1)
+    )
+    wiki = result.scalar_one_or_none()
+    if not wiki:
+        raise ValueError(f"Wiki 不存在: repo_id={repo_id}")
+
+    repo_name = wiki.title  # 用 wiki 标题作为 repo_name
+
+    # 2. 加载指定页面（含所属 section）
+    pages_result = await db.execute(
+        select(WikiPage)
+        .where(WikiPage.id.in_(page_ids))
+        .options(selectinload(WikiPage.section))
+    )
+    pages = pages_result.scalars().all()
+
+    if not pages:
+        logger.warning(f"[WikiGenerator] 未找到任何指定页面: page_ids={page_ids}")
+        return {"wiki_id": wiki.id, "total_pages": 0, "skipped_pages": 0}
+
+    total = len(pages)
+    if progress_callback:
+        await progress_callback(10, f"开始重新生成 {total} 个页面...")
+
+    # 3. 并发生成（复用现有逻辑）
+    semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
+
+    async def _regen_one(page: WikiPage):
+        if cancel_checker:
+            await cancel_checker()
+        async with semaphore:
+            logger.info(f"[WikiGenerator] 重新生成页面: {page.title}")
+            p_data = {
+                "title": page.title,
+                "importance": page.importance,
+                "relevant_files": page.relevant_files or [],
+                "order": page.order_index,
+            }
+            section_title = page.section.title if page.section else ""
+            code_context = await _retrieve_code_context(
+                collection, p_data["relevant_files"], page.title
+            )
+            content = await _generate_page_content(
+                adapter, model, p_data, section_title,
+                repo_name, code_context, language,
+            )
+            return page, content
+
+    tasks = [_regen_one(p) for p in pages]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 4. 串行写入 DB
+    updated = 0
+    skipped = 0
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"[WikiGenerator] 页面重新生成失败: {result}")
+            skipped += 1
+            continue
+        page, content = result
+        page.content_md = content
+        await db.commit()
+        updated += 1
+        if progress_callback:
+            pct = 10 + updated / total * 85
+            await progress_callback(pct, f"已更新页面 ({updated}/{total}): {page.title}")
+
+    logger.info(f"[WikiGenerator] 选择性重新生成完成: wiki_id={wiki.id} 更新={updated} 跳过={skipped}")
+    return {"wiki_id": wiki.id, "total_pages": updated, "skipped_pages": skipped}
 
 
 async def _plan_page(
@@ -1007,4 +1114,265 @@ def _default_outline(title: str = "Wiki") -> dict:
                 ],
             }
         ],
+    }
+
+
+# ============================================================
+# 增量 Wiki 更新（真正的增量，仅更新受变更影响的页面）
+# ============================================================
+
+async def _suggest_section_title(
+    adapter, model: str, current_title: str, page_titles: List[str], repo_name: str
+) -> Optional[str]:
+    """
+    当一个章节的大多数页面都需要更新时，询问 LLM 是否需要更改章节标题。
+    如果建议保持原标题则返回 None，否则返回新标题。
+    """
+    messages = [
+        LLMMessage(role="user", content=(
+            f"Repository: {repo_name}\n"
+            f"Current section title: {current_title}\n"
+            f"Pages in this section:\n" +
+            "\n".join(f"- {t}" for t in page_titles) +
+            "\n\nThe code in this section has been significantly updated. "
+            "Does the section title still accurately describe its content? "
+            "If yes, reply ONLY with the word KEEP. "
+            "If the title should be updated, reply with ONLY the new title (no quotes, no explanation, max 60 chars)."
+        )),
+    ]
+    try:
+        resp = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.1)
+        result = resp.content.strip()
+        if result.upper() == "KEEP" or not result:
+            return None
+        # Sanity check: title must be reasonable length
+        if len(result) > 80:
+            return None
+        return result
+    except Exception as e:
+        logger.warning(f"[WikiIncrUpdate] 章节标题建议失败: {e}")
+        return None
+
+
+async def update_wiki_incrementally(
+    db: AsyncSession,
+    repo_id: str,
+    changed_files: List[str],
+    llm_provider: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    progress_callback: Optional[Callable] = None,
+    cancel_checker: Optional[Callable] = None,
+) -> dict:
+    """
+    真正的增量 Wiki 更新：只更新受变更文件影响的页面，保留未受影响的内容。
+
+    策略：
+    - 通过 WikiPage.relevant_files 与 changed_files 交集找出"脏页"
+    - 脏页比例 <= 65%：只更新脏页，可弹性更新章节标题
+    - 脏页比例 > 65%：返回建议全量重新生成（不做任何更新）
+    - 新增文件无对应页面：忽略（下次全量重新生成时会覆盖）
+    - 已删除文件：从 relevant_files 中移除
+
+    返回:
+    {
+        "status": "updated" | "full_regen_suggested" | "no_wiki" | "no_changes",
+        "wiki_id": str | None,
+        "updated_pages": int,
+        "affected_ratio": float,
+        "suggestion_reason": str | None,
+    }
+    """
+    from app.models.wiki import Wiki, WikiSection, WikiPage
+    from app.models.repository import Repository
+    from sqlalchemy import select
+
+    # ── 加载现有 Wiki ────────────────────────────────────────
+    wiki_result = await db.execute(select(Wiki).where(Wiki.repo_id == repo_id))
+    wiki = wiki_result.scalar_one_or_none()
+
+    if not wiki:
+        # 尚无 Wiki，回退到全量生成
+        logger.info(f"[WikiIncrUpdate] repo_id={repo_id} 无现有 Wiki，回退全量生成")
+        wiki_result = await generate_wiki(
+            db, repo_id, llm_provider, llm_model, progress_callback, cancel_checker
+        )
+        return {"status": "no_wiki", "wiki_id": wiki_result["wiki_id"], "updated_pages": 0,
+                "skipped_pages": wiki_result.get("skipped_pages", 0),
+                "affected_ratio": 1.0, "suggestion_reason": None}
+
+    # ── 加载所有 Section + Page ──────────────────────────────
+    sections_result = await db.execute(
+        select(WikiSection).where(WikiSection.wiki_id == wiki.id)
+        .order_by(WikiSection.order_index)
+    )
+    sections = sections_result.scalars().all()
+
+    section_pages_map: Dict[str, List] = {}
+    all_pages = []
+    for section in sections:
+        pages_result = await db.execute(
+            select(WikiPage).where(WikiPage.section_id == section.id)
+            .order_by(WikiPage.order_index)
+        )
+        pages = pages_result.scalars().all()
+        section_pages_map[section.id] = pages
+        all_pages.extend(pages)
+
+    if not all_pages:
+        logger.info(f"[WikiIncrUpdate] repo_id={repo_id} Wiki 无页面，回退全量生成")
+        wiki_result = await generate_wiki(
+            db, repo_id, llm_provider, llm_model, progress_callback, cancel_checker
+        )
+        return {"status": "no_wiki", "wiki_id": wiki_result["wiki_id"], "updated_pages": 0,
+                "skipped_pages": wiki_result.get("skipped_pages", 0),
+                "affected_ratio": 1.0, "suggestion_reason": None}
+
+    # ── 路径规范化 ───────────────────────────────────────────
+    def _norm(p: str) -> str:
+        return p.replace("\\", "/").lstrip("/").lower()
+
+    changed_norm = {_norm(f) for f in changed_files if f}
+
+    if not changed_norm:
+        return {"status": "no_changes", "wiki_id": wiki.id, "updated_pages": 0,
+                "affected_ratio": 0.0, "suggestion_reason": None}
+
+    # ── 识别脏页 ─────────────────────────────────────────────
+    dirty_pages = []
+    clean_pages = []
+    page_section_map: Dict[str, WikiSection] = {}  # page.id -> section
+
+    for section in sections:
+        for page in section_pages_map.get(section.id, []):
+            page_section_map[page.id] = section
+            relevant_norm = {_norm(f) for f in (page.relevant_files or [])}
+            if relevant_norm & changed_norm:
+                dirty_pages.append(page)
+            else:
+                clean_pages.append(page)
+
+    affected_ratio = len(dirty_pages) / len(all_pages) if all_pages else 0.0
+    logger.info(
+        f"[WikiIncrUpdate] 脏页={len(dirty_pages)}/{len(all_pages)} "
+        f"(比例={affected_ratio:.1%}) repo_id={repo_id}"
+    )
+
+    # ── 阈值决策 ─────────────────────────────────────────────
+    FULL_REGEN_THRESHOLD = 0.65
+
+    if affected_ratio > FULL_REGEN_THRESHOLD:
+        reason = (
+            f"变更影响了 {len(dirty_pages)}/{len(all_pages)} 个页面（{affected_ratio:.0%}），"
+            "建议全量重新生成 Wiki 以确保内容完整性"
+        )
+        logger.info(f"[WikiIncrUpdate] {reason}")
+        return {
+            "status": "full_regen_suggested",
+            "wiki_id": wiki.id,
+            "updated_pages": 0,
+            "affected_ratio": affected_ratio,
+            "suggestion_reason": reason,
+        }
+
+    # ── 准备增量更新 ──────────────────────────────────────────
+    adapter = create_adapter(llm_provider)
+    model = llm_model or settings.DEFAULT_LLM_MODEL
+    language = settings.WIKI_LANGUAGE
+    collection = get_collection(repo_id)
+
+    repo_obj = await db.get(Repository, repo_id)
+    repo_name = repo_obj.name if repo_obj else repo_id
+
+    if progress_callback:
+        await progress_callback(5, f"增量更新：{len(dirty_pages)} 个页面受影响...")
+
+    # 删除文件的 relevant_files 清理：延迟到下次全量重新生成处理。
+    # 原因：changed_files 同时包含 A/M/D 三种类型，此处无法区分；
+    # 错误移除仍存在文件的路径会导致脏页判断失效。
+
+    # ── 并发更新脏页 ──────────────────────────────────────────
+    semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
+
+    async def _update_one(page: WikiPage) -> Tuple[WikiPage, Optional[str]]:
+        if cancel_checker:
+            await cancel_checker()
+        async with semaphore:
+            try:
+                section = page_section_map.get(page.id)
+                section_title = section.title if section else ""
+                code_context = await _retrieve_code_context(
+                    collection, page.relevant_files or [], page.title
+                )
+                new_content = await _generate_page_content(
+                    adapter, model,
+                    {
+                        "title": page.title,
+                        "importance": page.importance,
+                        "relevant_files": page.relevant_files or [],
+                        "order": page.order_index,
+                    },
+                    section_title, repo_name, code_context, language,
+                )
+                logger.info(f"[WikiIncrUpdate] 页面已更新: {page.title}")
+                return page, new_content
+            except Exception as e:
+                logger.error(f"[WikiIncrUpdate] 页面更新失败: {page.title} — {e}")
+                return page, None
+
+    tasks_list = [_update_one(p) for p in dirty_pages]
+    if progress_callback:
+        await progress_callback(15, f"并发更新 {len(dirty_pages)} 个受影响页面...")
+
+    results = await asyncio.gather(*tasks_list, return_exceptions=True)
+
+    # ── 写入 DB（串行） ───────────────────────────────────────
+    updated_count = 0
+    for result in results:
+        if isinstance(result, Exception):
+            continue
+        page, new_content = result
+        if new_content is not None:
+            page.content_md = new_content
+            updated_count += 1
+    # 先提交页面内容，确保 LLM 生成的内容不因后续章节标题评估失败而丢失
+    await db.commit()
+
+    # ── 弹性更新章节标题（显著变更时） ──────────────────────────
+    # IMPORTANT: _update_one 闭包中不访问 db，所有 DB 修改在 gather 完成后串行进行。
+    # 若将来 _generate_page_content / _retrieve_code_context 需要访问 db，
+    # 必须改为串行执行，因为 AsyncSession 不支持并发协程访问。
+    SECTION_TITLE_THRESHOLD = 0.80  # 章节内 80% 以上页面为脏页时，考虑更新章节标题
+    if affected_ratio > 0.20:  # 只有变更超过 20% 时才评估章节标题
+        for section in sections:
+            section_pages = section_pages_map.get(section.id, [])
+            if not section_pages:
+                continue
+            dirty_in_section = [p for p in section_pages if p in dirty_pages]
+            section_dirty_ratio = len(dirty_in_section) / len(section_pages)
+            if section_dirty_ratio >= SECTION_TITLE_THRESHOLD:
+                page_titles = [p.title for p in section_pages]
+                try:
+                    new_title = await _suggest_section_title(
+                        adapter, model, section.title, page_titles, repo_name
+                    )
+                    if new_title:
+                        logger.info(
+                            f"[WikiIncrUpdate] 章节标题更新: "
+                            f"'{section.title}' -> '{new_title}'"
+                        )
+                        section.title = new_title
+                except Exception as e:
+                    logger.warning(f"[WikiIncrUpdate] 章节标题评估失败: {e}")
+
+    await db.commit()
+
+    if progress_callback:
+        await progress_callback(95, f"增量更新完成：已更新 {updated_count} 个页面")
+
+    return {
+        "status": "updated",
+        "wiki_id": wiki.id,
+        "updated_pages": updated_count,
+        "affected_ratio": affected_ratio,
+        "suggestion_reason": None,
     }

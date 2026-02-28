@@ -233,7 +233,11 @@ INCREMENTAL_SYNC 触发（通过 /sync 端点或重新提交同 URL）
   └── Stage 2-4: 正常四阶段流程（force_full=False）
         ├── Parser: 文件 hash 未变 → 跳过（FileState 命中）
         ├── Parser: 文件 hash 已变 → 重新解析
-        └── Embedder: 仅处理变更文件 chunks，更新 FileState
+        ├── Embedder: 仅处理变更文件 chunks，更新 FileState
+        └── Stage 4 (Wiki): update_wiki_incrementally()
+              ├── 脏页比例 ≤ 65% → 增量更新脏页，保留干净页
+              ├── 脏页比例 > 65% → 不更新，返回建议全量重生成
+              └── Wiki 不存在   → 调用 generate_wiki() 全量生成
 ```
 
 ### Stage 1 分支逻辑（process_repo.py）
@@ -261,7 +265,9 @@ else:
 {
   "added": 3,
   "modified": 2,
-  "deleted": 1
+  "deleted": 1,
+  "unchanged": 0,
+  "changed_paths": ["app/api/chat.py", "app/services/embedder.py", "frontend/src/views/ChatView.vue"]
 }
 ```
 
@@ -271,7 +277,7 @@ else:
 
 ### INCREMENTAL_SYNC 允许 chunks=0
 
-若所有文件 hash 均未变更，Parser 返回空 chunks，Embedder 无写入，Wiki 重新生成。这是合法状态（表示代码未变但重新生成 Wiki），不视为失败。
+若所有文件 hash 均未变更，Parser 返回空 chunks，Embedder 无写入。Stage 4 仍会调用 `update_wiki_incrementally()`，此时脏页列表为空，直接返回不更新（跳过 Wiki 生成）。这是合法状态，不视为失败。
 
 ### repo.status 生命周期（增量）
 

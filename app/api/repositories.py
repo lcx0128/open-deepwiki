@@ -511,3 +511,47 @@ async def read_repository_file(
         "total_lines": total_lines,
         "language": language,
     }
+
+
+@router.get(
+    "/{repo_id}/pending-commits",
+    summary="获取远程仓库待同步的提交列表",
+)
+async def get_pending_commits(
+    repo_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    执行 git fetch 后，返回 HEAD..origin/{branch} 之间尚未同步的提交列表。
+    用于在增量同步弹窗中展示「本次将同步哪些提交」。
+    不启动 Celery 任务，仅做只读查询。
+    """
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+    if not repo.local_path:
+        raise HTTPException(status_code=400, detail="仓库尚未克隆")
+
+    import asyncio as _asyncio
+    from app.tasks.incremental_sync import get_pending_commits as _get_commits
+
+    branch = repo.default_branch or "main"
+    local_path = repo.local_path
+
+    try:
+        commits = await _asyncio.wait_for(
+            _get_commits(local_path, branch),
+            timeout=60.0,
+        )
+    except _asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="获取提交列表超时")
+    except Exception as e:
+        logger.exception(f"[RepoAPI] 获取 pending commits 失败: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"获取提交列表失败: {type(e).__name__}: {e}")
+
+    return {
+        "repo_id": repo_id,
+        "branch": branch,
+        "count": len(commits),
+        "commits": commits,
+    }

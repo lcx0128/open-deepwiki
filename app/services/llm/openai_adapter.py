@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import AsyncIterator, List, Optional
 
-from openai import AsyncOpenAI, RateLimitError, APIStatusError
+from openai import AsyncOpenAI, RateLimitError, APIStatusError, APIConnectionError, InternalServerError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.services.llm.adapter import BaseLLMAdapter
@@ -24,7 +24,7 @@ class OpenAIAdapter(BaseLLMAdapter):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=30),
-        retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError, asyncio.TimeoutError)),
+        retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError, asyncio.TimeoutError, APIConnectionError, InternalServerError)),
         before_sleep=lambda state: logger.warning(
             f"[OpenAIAdapter] 重试第 {state.attempt_number} 次"
         ),

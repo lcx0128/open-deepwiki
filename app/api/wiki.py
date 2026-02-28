@@ -106,6 +106,7 @@ async def regenerate_wiki(
         repo_url=repo.url,
         llm_provider=request.llm_provider,
         llm_model=request.llm_model,
+        pages=request.pages,
     )
     task.celery_task_id = celery_result.id
     await db.commit()
