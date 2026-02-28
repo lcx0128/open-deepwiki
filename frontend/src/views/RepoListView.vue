@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { getRepositories, deleteRepository, reprocessRepository, syncRepository, abortRepository } from '@/api/repositories'
+import { getRepositories, deleteRepository, reprocessRepository, syncRepository, abortRepository, getPendingCommits, type CommitInfo } from '@/api/repositories'
 import { regenerateWiki } from '@/api/wiki'
 import { useRepoStore } from '@/stores/repo'
 import { useTaskStore } from '@/stores/task'
@@ -23,6 +23,11 @@ const showSyncModal = ref(false)
 const syncLlmProvider = ref('')
 const syncLlmModel = ref('')
 const showSyncAdvanced = ref(false)
+const pendingCommits = ref<CommitInfo[]>([])
+const pendingCommitsLoading = ref(false)
+const pendingCommitsError = ref('')
+const showPendingCommits = ref(false)
+const pendingCommitsBranch = ref('')
 
 const filteredRepos = computed(() => {
   if (!filterStatus.value) return repoStore.repos
@@ -140,6 +145,28 @@ async function handleSync(repo: RepositoryItem) {
   syncLlmProvider.value = ''
   syncLlmModel.value = ''
   showSyncAdvanced.value = false
+  // 重置提交列表状态
+  pendingCommits.value = []
+  pendingCommitsLoading.value = false
+  pendingCommitsError.value = ''
+  showPendingCommits.value = false
+  pendingCommitsBranch.value = ''
+}
+
+async function loadPendingCommits() {
+  if (!syncTarget.value) return
+  pendingCommitsLoading.value = true
+  pendingCommitsError.value = ''
+  showPendingCommits.value = true
+  try {
+    const result = await getPendingCommits(syncTarget.value.id)
+    pendingCommits.value = result.commits
+    pendingCommitsBranch.value = result.branch
+  } catch {
+    pendingCommitsError.value = '获取提交列表失败，请检查网络连接'
+  } finally {
+    pendingCommitsLoading.value = false
+  }
 }
 
 async function confirmSync() {
@@ -407,14 +434,61 @@ onMounted(loadRepos)
 
     <!-- 增量同步弹窗 -->
     <div v-if="showSyncModal" class="modal-overlay" @click.self="showSyncModal = false">
-      <div class="modal card">
+      <div class="modal card sync-modal">
         <h3>增量更新仓库</h3>
         <p>
           将对仓库 <strong>{{ syncTarget?.name }}</strong> 执行增量同步：
-          拉取最新代码、仅重新处理变更文件并重新生成 Wiki。
+          拉取最新代码、仅重新处理变更文件并更新 Wiki。
           <br><br>
           <strong>同步期间将暂时无法查看 Wiki。</strong>
         </p>
+
+        <!-- 待同步提交查看器 -->
+        <div class="commits-section">
+          <button
+            class="advanced-toggle"
+            :disabled="pendingCommitsLoading"
+            @click="showPendingCommits ? (showPendingCommits = false) : loadPendingCommits()"
+          >
+            <svg
+              class="advanced-toggle__chevron"
+              :class="{ 'advanced-toggle__chevron--open': showPendingCommits }"
+              viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"
+            >
+              <path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span v-if="pendingCommitsLoading">正在获取提交列表...</span>
+            <span v-else-if="showPendingCommits && pendingCommits.length > 0">
+              隐藏提交列表（{{ pendingCommits.length }} 个新提交，分支：{{ pendingCommitsBranch }}）
+            </span>
+            <span v-else-if="showPendingCommits && pendingCommits.length === 0">
+              隐藏提交列表
+            </span>
+            <span v-else>查看待同步提交</span>
+          </button>
+
+          <div v-if="showPendingCommits" class="commits-panel">
+            <div v-if="pendingCommitsLoading" class="commits-loading">
+              <span class="spinner spinner--sm" />
+              <span>正在 git fetch...</span>
+            </div>
+            <div v-else-if="pendingCommitsError" class="commits-error">{{ pendingCommitsError }}</div>
+            <div v-else-if="pendingCommits.length === 0" class="commits-empty">
+              当前分支已是最新，无待同步提交。
+            </div>
+            <div v-else class="commits-list">
+              <div
+                v-for="commit in pendingCommits"
+                :key="commit.hash"
+                class="commit-item"
+              >
+                <code class="commit-hash">{{ commit.short_hash }}</code>
+                <span class="commit-message">{{ commit.message }}</span>
+                <span class="commit-meta">{{ commit.author }} · {{ commit.date }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <!-- LLM 高级选项 -->
         <button class="advanced-toggle" @click="showSyncAdvanced = !showSyncAdvanced">
@@ -783,4 +857,75 @@ onMounted(loadRepos)
 }
 .form-input:focus { border-color: var(--color-primary); }
 .form-select { cursor: pointer; }
+
+/* ── Sync modal ───────────────────────────────────── */
+.sync-modal {
+  max-width: 520px;
+}
+
+.commits-section {
+  margin-top: 4px;
+}
+
+.commits-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.commits-loading,
+.commits-error,
+.commits-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.commits-error { color: #ef4444; }
+
+.commits-list {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.commit-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: var(--font-size-xs);
+}
+.commit-item:last-child { border-bottom: none; }
+
+.commit-hash {
+  font-family: var(--font-mono);
+  color: var(--color-primary);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.commit-message {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-meta {
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.spinner--sm {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
 </style>

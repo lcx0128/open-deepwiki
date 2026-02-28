@@ -123,6 +123,7 @@ async def _run_task(
                     await _update_task(db, task_id, TaskStatus.GENERATING, 75, "正在重新生成 Wiki 文档...")
                     await _publish(task_id, "generating", 75, "正在重新生成 Wiki 文档...")
                     wiki_id = None
+                    wiki_skipped = 0
                     try:
                         from app.services.wiki_generator import generate_wiki
                         async def _wiki_regen_progress(pct: float, msg: str):
@@ -151,11 +152,13 @@ async def _run_task(
                         except Exception as _idx_err:
                             logger.warning(f"[Task] 代码库索引生成失败（不影响主流程）: {_idx_err}")
 
-                        wiki_id = await generate_wiki(
+                        wiki_result = await generate_wiki(
                             db, repo_id, llm_provider, llm_model,
                             progress_callback=_wiki_regen_progress,
                             cancel_checker=_wiki_regen_cancel,
                         )
+                        wiki_id = wiki_result["wiki_id"]
+                        wiki_skipped = wiki_result.get("skipped_pages", 0)
                     except NotImplementedError:
                         pass
                     await _update_task(db, task_id, TaskStatus.COMPLETED, 100, "Wiki 重新生成完成")
@@ -164,7 +167,8 @@ async def _run_task(
                         repo_obj.last_synced_at = datetime.now(timezone.utc)
                     await db.commit()
                     await _publish(task_id, "completed", 100, "Wiki 重新生成完成",
-                                   **({"wiki_id": wiki_id} if wiki_id else {}))
+                                   **({"wiki_id": wiki_id} if wiki_id else {}),
+                                   **({"skipped_pages": wiki_skipped} if wiki_skipped else {}))
                     return
 
                 # ===== 阶段 1: 克隆/同步仓库 =====
@@ -182,6 +186,8 @@ async def _run_task(
                     repo = repo_check
 
                     # 执行 git fetch + diff + merge + 清理 ChromaDB 已删除文件
+                    # 初始化 sync_stats 为安全默认值，防止 apply_incremental_sync 异常时 NameError
+                    sync_stats = {"added": 0, "modified": 0, "deleted": 0, "unchanged": 0, "changed_paths": []}
                     try:
                         from app.tasks.incremental_sync import apply_incremental_sync
                         from app.services.embedder import get_collection
@@ -311,18 +317,19 @@ async def _run_task(
                 except Exception as _idx_err:
                     logger.warning(f"[Task] 代码库索引生成失败（不影响主流程）: {_idx_err}")
 
-                # ===== 阶段 4: Wiki 生成 =====
+                # ===== 阶段 4: Wiki 生成 / 增量更新 =====
                 _stage = "generating"
                 await _update_task(db, task_id, TaskStatus.GENERATING, 75, "正在生成 Wiki 文档...")
                 await _publish(task_id, "generating", 75, "正在生成 Wiki 文档...")
 
                 wiki_id = None
+                wiki_skipped = 0
+                wiki_regen_suggestion = None
                 try:
-                    from app.services.wiki_generator import generate_wiki
+                    from app.services.wiki_generator import generate_wiki, update_wiki_incrementally
 
                     async def _wiki_progress(pct: float, msg: str):
                         actual_pct = 75 + pct * 0.2
-                        # 先检查 Redis 取消标志（无需 DB 写权限）
                         try:
                             from app.core.redis_client import check_cancel_flag
                             if await check_cancel_flag(task_id):
@@ -331,7 +338,6 @@ async def _run_task(
                             raise
                         except Exception:
                             pass
-                        # 更新 DB 进度（同时检查 DB 中的 CANCELLED 状态，并提交释放写锁）
                         await _update_task(db, task_id, TaskStatus.GENERATING, actual_pct, msg)
                         await _publish(task_id, "generating", actual_pct, msg)
 
@@ -340,11 +346,29 @@ async def _run_task(
                         if await check_cancel_flag(task_id):
                             raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
 
-                    wiki_id = await generate_wiki(
-                        db, repo_id, llm_provider, llm_model,
-                        progress_callback=_wiki_progress,
-                        cancel_checker=_wiki_cancel,
-                    )
+                    if is_incremental and sync_stats.get("changed_paths"):
+                        # 增量同步：使用真正的增量 Wiki 更新
+                        incr_result = await update_wiki_incrementally(
+                            db, repo_id,
+                            changed_files=sync_stats["changed_paths"],
+                            llm_provider=llm_provider,
+                            llm_model=llm_model,
+                            progress_callback=_wiki_progress,
+                            cancel_checker=_wiki_cancel,
+                        )
+                        wiki_id = incr_result.get("wiki_id")
+                        wiki_skipped = incr_result.get("skipped_pages", 0)
+                        if incr_result["status"] == "full_regen_suggested":
+                            wiki_regen_suggestion = incr_result.get("suggestion_reason")
+                    else:
+                        # 全量处理：全量生成 Wiki
+                        wiki_result = await generate_wiki(
+                            db, repo_id, llm_provider, llm_model,
+                            progress_callback=_wiki_progress,
+                            cancel_checker=_wiki_cancel,
+                        )
+                        wiki_id = wiki_result["wiki_id"]
+                        wiki_skipped = wiki_result.get("skipped_pages", 0)
                 except NotImplementedError:
                     pass
 
@@ -357,7 +381,9 @@ async def _run_task(
 
                 await _publish(
                     task_id, "completed", 100, "处理完成",
-                    **({"wiki_id": wiki_id} if wiki_id else {})
+                    **({"wiki_id": wiki_id} if wiki_id else {}),
+                    **({"wiki_regen_suggestion": wiki_regen_suggestion} if wiki_regen_suggestion else {}),
+                    **({"skipped_pages": wiki_skipped} if wiki_skipped else {}),
                 )
 
             except Exception as e:

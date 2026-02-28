@@ -125,3 +125,25 @@ export async function getFileContent(
   )
   return response.data
 }
+
+export interface CommitInfo {
+  hash: string
+  short_hash: string
+  message: string
+  author: string
+  date: string
+}
+
+export interface PendingCommitsResponse {
+  repo_id: string
+  branch: string
+  count: number
+  commits: CommitInfo[]
+}
+
+export async function getPendingCommits(repoId: string): Promise<PendingCommitsResponse> {
+  const response = await apiClient.get<PendingCommitsResponse>(
+    `/repositories/${repoId}/pending-commits`
+  )
+  return response.data
+}

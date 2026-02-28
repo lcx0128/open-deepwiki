@@ -31,12 +31,14 @@ def _detect_changed_files_sync(repo_path: str, branch: str = "main") -> List[Tup
     3. 解析输出，提取变更类型和文件路径
     """
     # Step 1: Fetch 远程更新
-    subprocess.run(
+    fetch_result = subprocess.run(
         ["git", "fetch", "origin", branch],
         cwd=repo_path,
         capture_output=True,
         timeout=120,
     )
+    if fetch_result.returncode != 0:
+        raise RuntimeError(f"git fetch 失败: {fetch_result.stderr.decode(errors='replace')}")
 
     # Step 2: Diff 检测变更
     result = subprocess.run(
@@ -78,12 +80,17 @@ def _detect_changed_files_sync(repo_path: str, branch: str = "main") -> List[Tup
 
 def _git_merge_ff_only_sync(repo_path: str, branch: str) -> None:
     """执行 git merge --ff-only（同步，由 asyncio.to_thread 包装调用）"""
-    subprocess.run(
+    result = subprocess.run(
         ["git", "merge", f"origin/{branch}", "--ff-only"],
         cwd=repo_path,
         capture_output=True,
         timeout=60,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git merge --ff-only 失败（本地分支可能已分叉）: "
+            f"{result.stderr.decode(errors='replace')}"
+        )
 
 
 async def apply_incremental_sync(
@@ -101,8 +108,10 @@ async def apply_incremental_sync(
     # 在线程池中运行阻塞的 git 操作，避免阻塞 asyncio 事件循环
     changes = await asyncio.to_thread(_detect_changed_files_sync, repo_path, branch)
     stats = {"added": 0, "modified": 0, "deleted": 0, "unchanged": 0}
+    changed_paths = []
 
     for change_type, file_path in changes:
+        changed_paths.append(file_path)
         if change_type == "D":
             # 删除：清理 ChromaDB chunks 和 FileState 记录
             await _delete_file_chunks(db, repo_id, file_path, chromadb_collection)
@@ -115,6 +124,8 @@ async def apply_incremental_sync(
             # 新增：无旧 chunks 需删除
             stats["added"] += 1
 
+    stats["changed_paths"] = changed_paths
+
     # 合并本地到远程版本（非阻塞）
     await asyncio.to_thread(_git_merge_ff_only_sync, repo_path, branch)
 
@@ -122,8 +133,7 @@ async def apply_incremental_sync(
     if changes:
         try:
             from app.services.codebase_indexer import update_codebase_index_for_files
-            # changes is list of (change_type, file_path) tuples — extract paths
-            changed_paths = [fp for _, fp in changes if fp]
+            # 复用已收集的 changed_paths，避免变量遮蔽
             await update_codebase_index_for_files(repo_id, db, changed_paths)
         except Exception as _idx_err:
             import logging as _logging
@@ -218,3 +228,52 @@ async def process_files_with_idempotency(
             db.add(new_state)
 
         await db.flush()
+
+
+def _get_pending_commits_sync(repo_path: str, branch: str = "main") -> list:
+    """
+    获取本地 HEAD 到 origin/{branch} 之间的提交列表（同步实现）。
+    先 git fetch，再 git log HEAD..origin/{branch}。
+    返回: [{"hash": str, "short_hash": str, "message": str, "author": str, "date": str}, ...]
+    """
+    # Step 1: fetch 远程（静默，不报错）
+    subprocess.run(
+        ["git", "fetch", "origin", branch],
+        cwd=repo_path,
+        capture_output=True,
+        timeout=120,
+    )
+
+    # Step 2: git log（使用 ASCII RS \x1e 作分隔符，避免提交信息中的 | 破坏解析）
+    result = subprocess.run(
+        ["git", "log", f"HEAD..origin/{branch}",
+         "--format=%H\x1e%s\x1e%an\x1e%ad", "--date=short"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    commits = []
+    for line in result.stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split("\x1e", 3)
+        if len(parts) < 4:
+            continue
+        full_hash, message, author, date = parts
+        commits.append({
+            "hash": full_hash,
+            "short_hash": full_hash[:7],
+            "message": message,
+            "author": author,
+            "date": date,
+        })
+    return commits
+
+
+async def get_pending_commits(repo_path: str, branch: str = "main") -> list:
+    """
+    异步包装：获取远程仓库自上次同步以来的新提交。
+    """
+    return await asyncio.to_thread(_get_pending_commits_sync, repo_path, branch)
