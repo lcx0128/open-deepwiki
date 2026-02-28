@@ -479,8 +479,9 @@ async def handle_deep_research_stream(
     ]
     yield {"type": "chunk_refs", "refs": chunk_refs}
 
-    # 11. 持久化
-    await append_turn(session_id, query, full_answer, chunk_refs, 0)
+    # 11. 持久化（仅最终轮写入，避免中间轮污染会话历史）
+    if is_final:
+        await append_turn(session_id, query, full_answer, chunk_refs, 0)
 
     # 12. 非最终轮提示前端继续
     if not is_final:

@@ -7,7 +7,7 @@ import json as _json
 import logging
 import re
 import xml.etree.ElementTree as ET
-from typing import List, Optional, Callable, Dict
+from typing import List, Optional, Callable, Dict, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -23,6 +23,7 @@ from app.services.mermaid_validator import (
     retry_failed_diagram_specs,
 )
 from app.services.token_degradation import is_token_overflow, generate_with_degradation
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -392,55 +393,90 @@ async def generate_wiki(
     db.add(wiki)
     await db.flush()
 
-    # ===== 阶段 2: 逐页生成内容 =====
+    # ===== 阶段 2: 并发生成页面内容 =====
     total_pages = sum(len(s["pages"]) for s in outline["sections"])
-    page_count = 0
 
     if total_pages == 0:
         logger.warning("[WikiGenerator] 大纲中无任何页面，跳过内容生成")
         await db.flush()
         return wiki.id
 
-    logger.info(f"[WikiGenerator] 开始生成页面内容: 共 {total_pages} 页")
+    logger.info(
+        f"[WikiGenerator] 开始生成页面内容: 共 {total_pages} 页"
+        f"（并发数={settings.WIKI_PAGE_CONCURRENCY}）"
+    )
 
-    for section_data in outline["sections"]:
-        section = WikiSection(
-            wiki_id=wiki.id,
-            title=section_data["title"],
-            order_index=section_data["order"],
-        )
-        db.add(section)
-        await db.flush()
+    # 2a: 并发执行所有页面的 LLM 调用（不涉及 DB，无 session 冲突）
+    semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
 
-        for page_data in section_data["pages"]:
-            page_count += 1
-            if progress_callback:
-                pct = page_count / total_pages * 100
-                await progress_callback(pct, f"生成页面 ({page_count}/{total_pages}): {page_data['title']}")
-
-            if cancel_checker:
-                await cancel_checker()
-            logger.info(f"[WikiGenerator] 生成页面: {page_data['title']}")
-
+    async def _generate_one(
+        s_data: dict, p_data: dict
+    ) -> Tuple[dict, dict, str]:
+        if cancel_checker:
+            await cancel_checker()
+        async with semaphore:
+            logger.info(f"[WikiGenerator] 生成页面: {p_data['title']}")
             code_context = await _retrieve_code_context(
-                collection, page_data.get("relevant_files", []), page_data["title"]
+                collection, p_data.get("relevant_files", []), p_data["title"]
             )
-
             content = await _generate_page_content(
-                adapter, model, page_data, section_data["title"],
+                adapter, model, p_data, s_data["title"],
                 repo_summary["repo_name"], code_context, language,
             )
+        return s_data, p_data, content
 
-            page = WikiPage(
-                section_id=section.id,
-                title=page_data["title"],
-                importance=page_data.get("importance", "medium"),
-                content_md=content,
-                relevant_files=page_data.get("relevant_files"),
-                order_index=page_data["order"],
+    # 保持原始顺序（section → page），asyncio.gather 保证结果顺序与任务顺序一致
+    task_meta: List[Tuple[dict, dict]] = [
+        (s_data, p_data)
+        for s_data in outline["sections"]
+        for p_data in s_data["pages"]
+    ]
+    tasks = [_generate_one(s, p) for s, p in task_meta]
+
+    if progress_callback:
+        await progress_callback(50, f"并发生成 {total_pages} 个页面（并发数={settings.WIKI_PAGE_CONCURRENCY}）...")
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 2b: 串行写入 DB（保持 AsyncSession 单协程使用，避免并发冲突）
+    section_map: Dict[str, WikiSection] = {}
+    page_count = 0
+
+    for (s_data, p_data), result in zip(task_meta, results):
+        section_title = s_data["title"]
+
+        # 按需创建 WikiSection（每个 section 只创建一次，保持 order_index 顺序）
+        if section_title not in section_map:
+            section = WikiSection(
+                wiki_id=wiki.id,
+                title=section_title,
+                order_index=s_data["order"],
             )
-            db.add(page)
-            await db.commit()  # 每页提交一次，释放写锁，允许并发写入（如 DELETE）
+            db.add(section)
+            await db.flush()
+            section_map[section_title] = section
+
+        if isinstance(result, Exception):
+            logger.error(
+                f"[WikiGenerator] 页面生成失败，跳过: {p_data['title']} — {result}"
+            )
+            continue
+
+        _, _, content = result
+        page = WikiPage(
+            section_id=section_map[section_title].id,
+            title=p_data["title"],
+            importance=p_data.get("importance", "medium"),
+            content_md=content,
+            relevant_files=p_data.get("relevant_files"),
+            order_index=p_data["order"],
+        )
+        db.add(page)
+        page_count += 1
+        if progress_callback:
+            pct = 50 + page_count / total_pages * 45
+            await progress_callback(pct, f"写入页面 ({page_count}/{total_pages}): {p_data['title']}")
+        await db.commit()  # 每页提交一次，释放写锁，允许并发写入（如 DELETE）
 
     logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id}")
     return wiki.id
