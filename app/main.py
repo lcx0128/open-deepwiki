@@ -50,6 +50,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 确保 ORM 模型注册到 SQLAlchemy（必须在 init_db 之前导入）
+from app.models.repo_index import RepoIndex  # noqa: F401
+
 # 注册路由
 from app.api.repositories import router as repositories_router
 from app.api.tasks import router as tasks_router

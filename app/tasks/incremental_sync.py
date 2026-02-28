@@ -118,6 +118,17 @@ async def apply_incremental_sync(
     # 合并本地到远程版本（非阻塞）
     await asyncio.to_thread(_git_merge_ff_only_sync, repo_path, branch)
 
+    # 增量更新代码库索引（仅更新变更文件的条目）
+    if changes:
+        try:
+            from app.services.codebase_indexer import update_codebase_index_for_files
+            # changes is list of (change_type, file_path) tuples — extract paths
+            changed_paths = [fp for _, fp in changes if fp]
+            await update_codebase_index_for_files(repo_id, db, changed_paths)
+        except Exception as _idx_err:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(f"[IncrementalSync] 更新代码库索引失败: {_idx_err}")
+
     return stats
 
 

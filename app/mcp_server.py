@@ -27,6 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from app.config import settings
 from app.database import async_session_factory
 from app.models.repository import Repository, RepoStatus
+from app.models.repo_index import RepoIndex  # noqa: F401 — ensures mapper resolves relationship
 from app.models.wiki import Wiki, WikiSection, WikiPage
 from app.schemas.mcp_types import CodeGuideline, FileContext
 from app.services.two_stage_retriever import stage1_discovery, stage2_assembly, read_file_context
