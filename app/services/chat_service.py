@@ -32,6 +32,7 @@ CRITICAL RULES:
 6. If the provided context is insufficient to fully answer, clearly state what you found AND what information is missing
 7. Use Chinese for explanations, keep code identifiers, file paths, and technical terms in English
 8. When describing module relationships, explicitly state: "A calls B", "B depends on C", "Data flows from X to Y"
+9. When documentation and code implementation contradict each other, trust the code as the authoritative source - documentation may be outdated.
 """
 
 DEEP_RESEARCH_SYSTEM_PROMPT = """You are conducting a thorough multi-turn Deep Research investigation of the repository "{repo_name}".

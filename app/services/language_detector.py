@@ -40,16 +40,53 @@ SKIP_DIRS = {
 SKIP_FILES = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Pipfile.lock", "poetry.lock", "go.sum",
+    "composer.lock", "Gemfile.lock",
 }
 
 # 单文件大小限制
 MAX_FILE_SIZE_BYTES = 1024 * 1024  # 1MB
+
+# 文档类文件扩展名
+DOC_EXTENSIONS: dict[str, str] = {
+    ".md": "markdown",
+    ".rst": "restructuredtext",
+    ".txt": "text",
+}
+
+# 配置文件白名单（按文件名精确匹配）
+CONFIG_FILENAMES: frozenset = frozenset({
+    "package.json",
+    "pyproject.toml",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    ".env.example",
+})
+
+# 文档/配置文件大小限制（100KB）
+DOC_MAX_FILE_SIZE_BYTES = 100 * 1024
 
 
 def detect_language(file_path: str) -> Optional[str]:
     """根据文件扩展名检测编程语言"""
     suffix = Path(file_path).suffix.lower()
     return EXTENSION_MAP.get(suffix)
+
+
+def is_doc_file(file_path: str) -> bool:
+    """判断文件是否为文档文件（.md/.rst/.txt）"""
+    suffix = Path(file_path).suffix.lower()
+    return suffix in DOC_EXTENSIONS
+
+
+def is_config_file(file_path: str) -> bool:
+    """判断文件是否为受支持的配置文件（按文件名白名单匹配）"""
+    return Path(file_path).name in CONFIG_FILENAMES
+
+
+def detect_doc_language(file_path: str) -> str:
+    """返回文档文件的语言标识（markdown/restructuredtext/text）"""
+    suffix = Path(file_path).suffix.lower()
+    return DOC_EXTENSIONS.get(suffix, "text")
 
 
 def get_parser(language: str) -> Parser:
@@ -82,13 +119,21 @@ def should_skip(file_path: str) -> bool:
     if path.name in SKIP_FILES:
         return True
 
+    # 跳过 .env 敏感文件（仅保留 .env.example）
+    if path.name.startswith('.env') and path.name != '.env.example':
+        return True
+
     # 跳过不支持的扩展名
-    if path.suffix.lower() not in EXTENSION_MAP:
+    if (path.suffix.lower() not in EXTENSION_MAP
+            and not is_doc_file(file_path)
+            and not is_config_file(file_path)):
         return True
 
     # 跳过过大文件
     try:
-        if path.stat().st_size > MAX_FILE_SIZE_BYTES:
+        file_size = path.stat().st_size
+        max_size = DOC_MAX_FILE_SIZE_BYTES if (is_doc_file(file_path) or is_config_file(file_path)) else MAX_FILE_SIZE_BYTES
+        if file_size > max_size:
             return True
     except OSError:
         return True

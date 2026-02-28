@@ -137,6 +137,23 @@ async def stage1_discovery(
         # Import / dependency related
         "import": "import_statement", "依赖": "import_statement",
         "dependency": "import_statement", "引用": "import_statement",
+        # 文档类 (document sections)
+        "readme": "document_section", "文档": "document_section",
+        "说明": "document_section", "教程": "document_section",
+        "手册": "document_section", "documentation": "document_section",
+        "guide": "document_section", "介绍": "document_section",
+        "overview": "document_section", "安装说明": "document_section",
+        "install": "document_section", "使用说明": "document_section",
+        "快速开始": "document_section", "功能说明": "document_section",
+        "使用方法": "document_section", "changelog": "document_section",
+        "更新日志": "document_section", "contributing": "document_section",
+        "贡献": "document_section", "setup": "document_section",
+        "部署说明": "document_section", "deployment": "document_section",
+        # 配置文件类 (config files)
+        "配置文件": "config_file", "package.json": "config_file",
+        "docker": "config_file", "环境变量": "config_file",
+        "npm": "config_file", "依赖配置": "config_file",
+        "compose": "config_file", "dockerfile": "config_file",
     }
     try:
         query_lower = query.lower()

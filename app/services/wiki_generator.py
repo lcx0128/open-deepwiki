@@ -170,6 +170,7 @@ File structure:
 File summaries (classes and functions):
 {file_summaries}
 
+{readme_content_section}
 Output language: {language}
 All section titles, page titles, and any text content in the XML MUST be written in {language}. Do not use any other language.
 
@@ -738,6 +739,21 @@ async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
     except Exception as e:
         logger.warning(f"[WikiGenerator] 获取 ChromaDB 摘要失败: {e}")
 
+    # 读取 README.md 内容（如有）
+    readme_content = ""
+    try:
+        import os
+        local_path = repo.local_path if repo and repo.local_path else ""
+        if local_path:
+            for readme_name in ("README.md", "readme.md", "README.rst", "README.txt"):
+                readme_path = os.path.join(local_path, readme_name)
+                if os.path.exists(readme_path):
+                    with open(readme_path, "r", encoding="utf-8", errors="replace") as f:
+                        readme_content = f.read(3000)
+                    break
+    except Exception:
+        readme_content = ""
+
     return {
         "repo_name": repo_name,
         "languages": ", ".join(sorted(languages)) or "unknown",
@@ -745,6 +761,8 @@ async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
         "file_tree": file_tree,
         "file_summaries": file_summaries,
         "language_stats": language_stats,
+        "readme_content": readme_content,
+        "readme_content_section": f"## README 文档概述\n{readme_content}\n" if readme_content else "",
     }
 
 
