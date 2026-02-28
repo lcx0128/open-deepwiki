@@ -186,7 +186,10 @@ async function confirmSync() {
 
 function formatDate(dateStr: string | null) {
   if (!dateStr) return '从未同步'
-  return new Date(dateStr).toLocaleString('zh-CN', {
+  // 后端返回 naive datetime（无时区后缀），需补 Z 告知 JS 这是 UTC，
+  // 否则 JS 会将其当本地时间解析，导致 UTC+8 下显示时间偏早 8 小时
+  const normalized = /Z|[+-]\d{2}:\d{2}$/.test(dateStr) ? dateStr : dateStr + 'Z'
+  return new Date(normalized).toLocaleString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
