@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, watch, ref, computed, nextTick } from 'vue'
+import { onMounted, onUnmounted, watch, ref, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { getWiki, regenerateWiki, deleteWiki } from '@/api/wiki'
 import { deleteRepository } from '@/api/repositories'
@@ -9,6 +9,7 @@ import { useRepoStore } from '@/stores/repo'
 import { useEventSource } from '@/composables/useEventSource'
 import WikiSidebar from '@/components/WikiSidebar.vue'
 import MarkdownView from '@/components/MarkdownView.vue'
+import WikiSearch from '@/components/WikiSearch.vue'
 
 const props = defineProps<{ repoId: string }>()
 const router = useRouter()
@@ -47,6 +48,53 @@ const showDeleteRepoConfirm = ref(false)
 const chatQuery = ref('')
 const isSidebarOpen = ref(false)
 const deepResearchMode = ref(false)
+const showSearch = ref(false)
+const pendingSearchKeyword = ref('')
+
+function handleGlobalKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault()
+    if (wikiStore.wiki) showSearch.value = true
+  }
+}
+
+/** Walk the rendered wiki content and scroll to the first text node matching keyword */
+async function scrollToKeyword(keyword: string) {
+  if (!keyword) return
+  // Wait for MarkdownView to finish rendering
+  await nextTick()
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+
+  const container = document.querySelector('.wiki-content-body')
+  if (!container) return
+
+  const keywordLower = keyword.toLowerCase()
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    const text = node.textContent ?? ''
+    if (text.toLowerCase().includes(keywordLower)) {
+      const el = node.parentElement
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        el.classList.add('wiki-search-highlight')
+        setTimeout(() => el.classList.remove('wiki-search-highlight'), 2200)
+      }
+      break
+    }
+  }
+}
+
+async function handleSearchNavigate(sectionId: string, pageId: string, keyword: string) {
+  if (wikiStore.activePageId === pageId) {
+    // Already on this page — watcher won't fire, scroll directly
+    scrollToKeyword(keyword)
+  } else {
+    pendingSearchKeyword.value = keyword
+    wikiStore.setActivePage(sectionId, pageId)
+  }
+}
 
 // TOC from page headings
 const tocItems = computed(() => {
@@ -199,16 +247,28 @@ function handleChatKeydown(e: KeyboardEvent) {
   }
 }
 
-onMounted(loadWiki)
+onMounted(() => {
+  loadWiki()
+  window.addEventListener('keydown', handleGlobalKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
+})
+
 watch(() => props.repoId, loadWiki)
 
-watch(() => wikiStore.activePageId, () => {
-  nextTick(() => {
-    const el = document.querySelector('.wiki-content-body')
-    if (el) el.scrollTop = 0
-    // Close mobile sidebar after nav
-    isSidebarOpen.value = false
-  })
+watch(() => wikiStore.activePageId, async () => {
+  await nextTick()
+  const el = document.querySelector('.wiki-content-body')
+  if (el) el.scrollTop = 0
+  isSidebarOpen.value = false
+  // Scroll to search keyword if a search navigation was triggered
+  if (pendingSearchKeyword.value) {
+    const kw = pendingSearchKeyword.value
+    pendingSearchKeyword.value = ''
+    scrollToKeyword(kw)
+  }
 })
 </script>
 
@@ -274,6 +334,19 @@ watch(() => wikiStore.activePageId, () => {
             </nav>
           </div>
           <div class="wiki-toolbar__right">
+            <button
+              class="toolbar-btn toolbar-btn--search"
+              @click="showSearch = true"
+              title="搜索 Wiki 内容 (Ctrl+K)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+              <span>搜索</span>
+              <kbd class="toolbar-kbd">Ctrl K</kbd>
+            </button>
+            <div class="toolbar-divider" />
             <button
               class="toolbar-btn"
               @click="handleRegenerate"
@@ -392,6 +465,12 @@ watch(() => wikiStore.activePageId, () => {
         </div>
       </template>
     </div>
+
+    <!-- Wiki Search modal -->
+    <WikiSearch
+      v-model="showSearch"
+      @navigate="handleSearchNavigate"
+    />
 
     <!-- Delete Wiki modal -->
     <div v-if="showDeleteConfirm" class="modal-overlay" @click.self="showDeleteConfirm = false">
@@ -801,5 +880,39 @@ watch(() => wikiStore.activePageId, () => {
   border-color: #7c3aed;
   color: #7c3aed;
   background: rgba(124, 58, 237, 0.15);
+}
+
+/* Toolbar search button */
+.toolbar-btn--search {
+  gap: 6px;
+}
+
+.toolbar-kbd {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 900px) {
+  .toolbar-kbd { display: none; }
+}
+
+/* Keyword scroll-to highlight flash */
+:deep(.wiki-search-highlight) {
+  border-radius: 3px;
+  outline-offset: 1px;
+  animation: wiki-kw-flash 2s ease-out forwards;
+}
+
+@keyframes wiki-kw-flash {
+  0%   { background: rgba(253, 224, 71, 0.55); outline: 2px solid rgba(234, 179, 8, 0.6); }
+  40%  { background: rgba(253, 224, 71, 0.4);  outline: 2px solid rgba(234, 179, 8, 0.4); }
+  100% { background: transparent;               outline: 2px solid transparent; }
 }
 </style>

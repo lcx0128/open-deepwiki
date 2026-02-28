@@ -254,6 +254,75 @@ function clearChat() {
   codePanel.value = null
 }
 
+function handleExportMarkdown() {
+  const messages = chatStore.messages
+  if (messages.length === 0) return
+
+  const now = new Date()
+  const dateStr = now.toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+
+  const lines: string[] = []
+
+  lines.push('# AI 代码问答记录')
+  lines.push('')
+  lines.push(`> **导出时间**：${dateStr}`)
+  if (chatStore.sessionId) {
+    lines.push(`> **会话 ID**：\`${chatStore.sessionId}\``)
+  }
+  lines.push(`> **仓库 ID**：\`${props.repoId}\``)
+  lines.push('')
+  lines.push('---')
+  lines.push('')
+
+  for (const msg of messages) {
+    const time = new Date(msg.timestamp).toLocaleTimeString('zh-CN', {
+      hour: '2-digit', minute: '2-digit',
+    })
+
+    if (msg.role === 'user') {
+      lines.push(`## 用户 · ${time}`)
+      lines.push('')
+      // Indent each line so the user message stands out as a block quote
+      for (const line of msg.content.split('\n')) {
+        lines.push(`> ${line}`)
+      }
+      lines.push('')
+    } else {
+      lines.push(`## AI 助手 · ${time}`)
+      lines.push('')
+      lines.push(msg.content)
+      lines.push('')
+      if (msg.chunkRefs && msg.chunkRefs.length > 0) {
+        lines.push('**代码引用：**')
+        lines.push('')
+        for (const ref of msg.chunkRefs) {
+          lines.push(`- \`${ref.file_path}:${ref.start_line}-${ref.end_line}\` — ${ref.name}`)
+        }
+        lines.push('')
+      }
+    }
+
+    lines.push('---')
+    lines.push('')
+  }
+
+  lines.push('*本记录由 Open DeepWiki 导出*')
+
+  const content = lines.join('\n')
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `chat-${props.repoId}-${now.toISOString().slice(0, 10)}.md`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 // Load file content into right panel
 async function loadFilePanel(ref: ChunkRef) {
   codePanel.value = {
@@ -379,6 +448,19 @@ onUnmounted(() => {
           <span class="dr-badge__dot" />
           深度研究 {{ drIteration }}/5
         </div>
+        <button
+          class="btn btn-ghost btn-sm export-btn"
+          @click="handleExportMarkdown"
+          :disabled="chatStore.messages.length === 0"
+          title="导出对话为 Markdown"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          导出
+        </button>
         <button
           class="btn btn-ghost btn-sm"
           @click="clearChat"
@@ -579,6 +661,17 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.export-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.export-btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 
 .back-btn {
