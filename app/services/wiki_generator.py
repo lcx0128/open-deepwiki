@@ -491,6 +491,105 @@ async def generate_wiki(
     return {"wiki_id": wiki.id, "total_pages": total_pages, "skipped_pages": skipped_count}
 
 
+async def regenerate_specific_pages(
+    db: AsyncSession,
+    repo_id: str,
+    page_ids: List[str],
+    llm_provider: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    progress_callback: Optional[Callable] = None,
+    cancel_checker: Optional[Callable] = None,
+) -> dict:
+    """
+    选择性重新生成指定页面。
+    只更新 content_md，不重新生成大纲或触碰其他页面。
+    返回: {"wiki_id": str, "total_pages": int, "skipped_pages": int}
+    """
+    from app.config import settings
+    from app.models.wiki import Wiki, WikiSection, WikiPage
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    adapter = create_adapter(llm_provider)
+    model = llm_model or settings.DEFAULT_LLM_MODEL
+    language = settings.WIKI_LANGUAGE
+    collection = get_collection(repo_id)
+
+    logger.info(f"[WikiGenerator] 选择性重新生成 {len(page_ids)} 个页面: repo_id={repo_id}")
+
+    # 1. 加载 Wiki（获取 wiki_id 和 repo_name）
+    result = await db.execute(
+        select(Wiki).where(Wiki.repo_id == repo_id).order_by(Wiki.created_at.desc()).limit(1)
+    )
+    wiki = result.scalar_one_or_none()
+    if not wiki:
+        raise ValueError(f"Wiki 不存在: repo_id={repo_id}")
+
+    repo_name = wiki.title  # 用 wiki 标题作为 repo_name
+
+    # 2. 加载指定页面（含所属 section）
+    pages_result = await db.execute(
+        select(WikiPage)
+        .where(WikiPage.id.in_(page_ids))
+        .options(selectinload(WikiPage.section))
+    )
+    pages = pages_result.scalars().all()
+
+    if not pages:
+        logger.warning(f"[WikiGenerator] 未找到任何指定页面: page_ids={page_ids}")
+        return {"wiki_id": wiki.id, "total_pages": 0, "skipped_pages": 0}
+
+    total = len(pages)
+    if progress_callback:
+        await progress_callback(10, f"开始重新生成 {total} 个页面...")
+
+    # 3. 并发生成（复用现有逻辑）
+    semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
+
+    async def _regen_one(page: WikiPage):
+        if cancel_checker:
+            await cancel_checker()
+        async with semaphore:
+            logger.info(f"[WikiGenerator] 重新生成页面: {page.title}")
+            p_data = {
+                "title": page.title,
+                "importance": page.importance,
+                "relevant_files": page.relevant_files or [],
+                "order": page.order_index,
+            }
+            section_title = page.section.title if page.section else ""
+            code_context = await _retrieve_code_context(
+                collection, p_data["relevant_files"], page.title
+            )
+            content = await _generate_page_content(
+                adapter, model, p_data, section_title,
+                repo_name, code_context, language,
+            )
+            return page, content
+
+    tasks = [_regen_one(p) for p in pages]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 4. 串行写入 DB
+    updated = 0
+    skipped = 0
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"[WikiGenerator] 页面重新生成失败: {result}")
+            skipped += 1
+            continue
+        page, content = result
+        page.content_md = content
+        await db.commit()
+        updated += 1
+        if progress_callback:
+            pct = 10 + updated / total * 85
+            await progress_callback(pct, f"已更新页面 ({updated}/{total}): {page.title}")
+
+    logger.info(f"[WikiGenerator] 选择性重新生成完成: wiki_id={wiki.id} 更新={updated} 跳过={skipped}")
+    return {"wiki_id": wiki.id, "total_pages": updated, "skipped_pages": skipped}
+
+
 async def _plan_page(
     adapter, model: str, page_data: dict,
     section_title: str, repo_name: str, code_context: str,

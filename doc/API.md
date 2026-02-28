@@ -400,7 +400,7 @@ es.onmessage = (event) => {
 
 ### POST /api/wiki/{repo_id}/regenerate — 重新生成 Wiki
 
-触发指定仓库的 Wiki 重新生成任务，返回 task_id 供 SSE 跟踪进度。
+触发指定仓库的 Wiki 重新生成任务，返回 task_id 供 SSE 跟踪进度。支持全量重新生成（重建大纲和所有页面）或选择性重新生成（仅更新指定页面的 `content_md`，不改动大纲和其他页面）。
 
 **路径参数**:
 
@@ -422,7 +422,7 @@ es.onmessage = (event) => {
 |------|------|------|------|
 | `llm_provider` | string | 否 | LLM 供应商，不填则使用环境变量默认值 |
 | `llm_model` | string | 否 | 模型名称 |
-| `pages` | array | 否 | 仅重新生成指定页面 ID 列表（预留，当前全量重生成） |
+| `pages` | array | 否 | 指定页面 ID 列表。**有值**时仅重新生成这些页面（选择性模式）；**不传或为 null** 时全量重新生成整个 Wiki |
 
 **成功响应 (201)**:
 

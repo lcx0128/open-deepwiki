@@ -24,6 +24,7 @@ def process_repository_task(
     branch: str = None,  # None = 使用远端默认分支
     llm_provider: str = None,
     llm_model: str = None,
+    pages: list = None,
 ):
     """
     仓库处理主任务 (Celery Task)。
@@ -39,6 +40,7 @@ def process_repository_task(
             branch=branch,
             llm_provider=llm_provider,
             llm_model=llm_model,
+            pages=pages,
         ))
     except Exception as exc:
         if self.request.retries < self.max_retries and not isinstance(exc, TaskCancelledException):
@@ -63,6 +65,7 @@ async def _run_task(
     branch: str = None,  # None = 使用远端默认分支
     llm_provider: str = None,
     llm_model: str = None,
+    pages: list = None,
 ):
     """异步任务执行主体"""
     from app.database import async_session_factory
@@ -152,11 +155,19 @@ async def _run_task(
                         except Exception as _idx_err:
                             logger.warning(f"[Task] 代码库索引生成失败（不影响主流程）: {_idx_err}")
 
-                        wiki_result = await generate_wiki(
-                            db, repo_id, llm_provider, llm_model,
-                            progress_callback=_wiki_regen_progress,
-                            cancel_checker=_wiki_regen_cancel,
-                        )
+                        if pages:
+                            from app.services.wiki_generator import regenerate_specific_pages
+                            wiki_result = await regenerate_specific_pages(
+                                db, repo_id, pages, llm_provider, llm_model,
+                                progress_callback=_wiki_regen_progress,
+                                cancel_checker=_wiki_regen_cancel,
+                            )
+                        else:
+                            wiki_result = await generate_wiki(
+                                db, repo_id, llm_provider, llm_model,
+                                progress_callback=_wiki_regen_progress,
+                                cancel_checker=_wiki_regen_cancel,
+                            )
                         wiki_id = wiki_result["wiki_id"]
                         wiki_skipped = wiki_result.get("skipped_pages", 0)
                     except NotImplementedError:
