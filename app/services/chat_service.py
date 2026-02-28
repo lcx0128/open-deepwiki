@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.query_fusion import fuse_query
-from app.services.two_stage_retriever import stage1_discovery, stage2_assembly, read_file_context
+from app.services.two_stage_retriever import stage1_discovery, stage2_assembly, read_file_context, stage2_gap_fill_constants
 from app.services.conversation_memory import create_session, get_history, append_turn, session_exists
 from app.services.retrieval_planner import is_broad_query, plan_retrieval
 from app.services.token_budget import apply_token_budget, estimate_tokens
@@ -182,6 +182,15 @@ async def handle_chat(
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
 
+    # 4.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
+    try:
+        gap_contents = await stage2_gap_fill_constants(guidelines[:10], repo_id)
+        if gap_contents:
+            code_contents = gap_contents + code_contents
+            logger.info(f"[ChatService] Round 2 gap-fill: 补取 {len(gap_contents)} 个常量 chunk")
+    except Exception as _gf:
+        logger.debug(f"[ChatService] gap-fill failed (non-fatal): {_gf}")
+
     # 5. Token 预算管理 + 代码库索引注入
     repo_name = await _get_repo_name(db, repo_id)
     codebase_index_text = await _get_codebase_index_text(db, repo_id)
@@ -306,6 +315,15 @@ async def handle_chat_stream(
     guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
+
+    # 3.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
+    try:
+        gap_contents = await stage2_gap_fill_constants(guidelines[:10], repo_id)
+        if gap_contents:
+            code_contents = gap_contents + code_contents
+            logger.info(f"[ChatService] Round 2 gap-fill: 补取 {len(gap_contents)} 个常量 chunk")
+    except Exception as _gf:
+        logger.debug(f"[ChatService] gap-fill failed (non-fatal): {_gf}")
 
     # 4. Token 预算管理 + 代码库索引注入
     repo_name = await _get_repo_name(db, repo_id)
@@ -448,6 +466,15 @@ async def handle_deep_research_stream(
     guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
+
+    # 5.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
+    try:
+        gap_contents = await stage2_gap_fill_constants(guidelines[:10], repo_id)
+        if gap_contents:
+            code_contents = gap_contents + code_contents
+            logger.info(f"[DeepResearch] Round 2 gap-fill: 补取 {len(gap_contents)} 个常量 chunk")
+    except Exception as _gf:
+        logger.debug(f"[DeepResearch] gap-fill failed (non-fatal): {_gf}")
 
     # 6. 组装系统 prompt + 代码库索引注入
     codebase_index_text = await _get_codebase_index_text(db, repo_id)
