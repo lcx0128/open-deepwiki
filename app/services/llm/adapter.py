@@ -8,7 +8,7 @@ from app.schemas.llm import LLMMessage, LLMResponse
 logger = logging.getLogger(__name__)
 
 # 单次 LLM API 调用超时（秒），超时后触发重试
-LLM_CALL_TIMEOUT = 480  # 8 分钟
+LLM_CALL_TIMEOUT = 240  # 4 分钟
 
 
 class BaseLLMAdapter(ABC):

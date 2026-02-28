@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     # 并发
     MAX_CONCURRENT_LLM_CALLS: int = 10
+    WIKI_PAGE_CONCURRENCY: int = 3
 
     # MCP
     MCP_AUTH_TOKEN: Optional[str] = None

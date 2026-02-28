@@ -1,8 +1,12 @@
+import re
 from typing import List, Optional
 from tree_sitter import Node
 from app.schemas.chunk_node import ChunkNode
 from app.services.language_detector import get_parser
 from app.services.orm_detector import _detect_orm_model
+
+# Regex for ALL_CAPS constant names (length >= 3)
+_CONSTANT_NAME_RE = re.compile(r'^[A-Z][A-Z0-9_]{2,}$')
 
 # ============================================================
 # 各语言的关键节点类型映射
@@ -110,6 +114,11 @@ def parse_file(file_path: str, source_code: str, language: str) -> List[ChunkNod
             content=source_code[:8000],  # 截断过长文件
             language=language,
         ))
+
+    # 提取模块级字符串常量（仅 Python）
+    if language == "python":
+        constant_chunks = _extract_module_constants(root_node, file_path, language, source_code)
+        chunks.extend(constant_chunks)
 
     return chunks
 
@@ -235,3 +244,77 @@ def _extract_decorators(node: Node, language: str, source: str) -> List[str]:
                 if child.type == "decorator":
                     decorators.append(source[child.start_byte:child.end_byte].strip())
     return decorators
+
+
+def _extract_module_constants(
+    root_node: Node,
+    file_path: str,
+    language: str,
+    source_code: str,
+) -> List[ChunkNode]:
+    """
+    扫描模块根节点的直接子节点，提取 Python 模块级大写字符串常量赋值。
+
+    匹配模式（tree-sitter Python 两种变体）：
+      module → expression_statement → assignment → identifier (left) + string/concatenated_string (right)
+      module → assignment → identifier (left) + string/concatenated_string (right)
+
+    过滤条件：
+      - 变量名必须全大写且长度 >= 3（正则 ^[A-Z][A-Z0-9_]{2,}$）
+      - 字符串内容长度必须超过 100 个字符（排除短配置值）
+    """
+    constant_chunks: List[ChunkNode] = []
+
+    def _try_extract_assignment(node: Node) -> Optional[ChunkNode]:
+        """尝试将 assignment 节点解析为常量 ChunkNode，失败返回 None。"""
+        left_node: Optional[Node] = None
+        right_node: Optional[Node] = None
+
+        for child in node.children:
+            if child.type == "identifier" and left_node is None:
+                left_node = child
+            elif child.type in ("string", "concatenated_string") and left_node is not None:
+                right_node = child
+
+        if left_node is None or right_node is None:
+            return None
+
+        name = left_node.text.decode("utf-8")
+        if not _CONSTANT_NAME_RE.match(name):
+            return None
+
+        string_content = source_code[right_node.start_byte:right_node.end_byte]
+        if len(string_content) <= 100:
+            return None
+
+        full_content = source_code[node.start_byte:node.end_byte]
+
+        return ChunkNode(
+            file_path=file_path,
+            node_type="constant",
+            name=name,
+            start_line=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
+            content=full_content,
+            language=language,
+            parent_id=None,
+            parent_name=None,
+        )
+
+    for child in root_node.children:
+        chunk: Optional[ChunkNode] = None
+
+        if child.type == "expression_statement":
+            # 标准变体：module → expression_statement → assignment
+            for sub in child.children:
+                if sub.type == "assignment":
+                    chunk = _try_extract_assignment(sub)
+                    break
+        elif child.type == "assignment":
+            # 扁平变体：module → assignment
+            chunk = _try_extract_assignment(child)
+
+        if chunk is not None:
+            constant_chunks.append(chunk)
+
+    return constant_chunks

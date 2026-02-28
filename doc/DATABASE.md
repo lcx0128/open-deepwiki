@@ -219,12 +219,53 @@ alembic current
 
 ---
 
+## repo_indexes 表
+
+**业务含义**: 存储每个仓库的代码库结构索引，以 JSON 格式记录所有文件的函数、类、常量列表。在每次 AI 问答时注入 System Prompt，帮助 LLM 了解全局代码结构；同时作为检索规划智能体的输入，指导 RAG 检索目标文件。
+
+| 列名 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `repo_id` | VARCHAR(36) | PK, FK(repositories.id) CASCADE | 一对一绑定仓库，即主键也是外键 |
+| `index_json` | JSON | NULLABLE | 代码库索引：`{file_path: {language, functions[], classes[], constants[]}}` |
+| `generated_at` | DATETIME | NULLABLE | 索引生成时间戳 |
+
+**index_json 格式示例**:
+```json
+{
+    "app/services/chat_service.py": {
+        "language": "python",
+        "functions": ["handle_chat", "handle_chat_stream", "handle_deep_research_stream"],
+        "classes": [],
+        "constants": ["CHAT_SYSTEM_PROMPT", "DEEP_RESEARCH_SYSTEM_PROMPT"]
+    },
+    "app/models/repository.py": {
+        "language": "python",
+        "functions": [],
+        "classes": ["Repository"],
+        "constants": []
+    }
+}
+```
+
+**索引**:
+- 主键索引: `repo_id`
+
+**外键约束**: `repo_id` → `repositories.id`，`ON DELETE CASCADE`（仓库删除时自动级联删除）
+
+**更新策略**:
+- 全量处理（FULL_PROCESS / WIKI_REGENERATE）: 完整重建整个索引（Stage 3.5）
+- 增量同步（INCREMENTAL_SYNC）: 仅更新有变更的文件对应的索引条目，其余条目保持不变
+
+---
+
 ## 表关系图（更新）
 
 ```
 repositories (1) ──── (N) tasks
      │
      ├──── (N) file_states
+     │
+     ├──── (1) repo_indexes
      │
      └──── (N) wikis (1) ──── (N) wiki_sections (1) ──── (N) wiki_pages
 ```
@@ -239,3 +280,4 @@ repositories (1) ──── (N) tasks
 | 002 | `20260221_002_add_failed_at_stage.py` | tasks 表新增 failed_at_stage 字段 |
 | 003 | `20260221_003_add_wiki_tables.py` | 新增 Wiki 文档表（wikis, wiki_sections, wiki_pages） |
 | 004 | `20260227_004_add_interrupted_status.py` | repositories 和 tasks 的 status ENUM 新增 interrupted 值 |
+| 005 | `20260228_005_add_repo_index.py` | 新增 repo_indexes 表（代码库结构索引） |

@@ -51,3 +51,4 @@ class Repository(Base):
         "FileState", back_populates="repository", cascade="all, delete-orphan"
     )
     wikis = relationship("Wiki", back_populates="repository", cascade="all, delete-orphan")
+    repo_index = relationship("RepoIndex", back_populates="repository", uselist=False, cascade="all, delete-orphan")

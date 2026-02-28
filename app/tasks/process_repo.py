@@ -125,7 +125,6 @@ async def _run_task(
                     wiki_id = None
                     try:
                         from app.services.wiki_generator import generate_wiki
-
                         async def _wiki_regen_progress(pct: float, msg: str):
                             actual_pct = 75 + pct * 0.2
                             try:
@@ -143,6 +142,14 @@ async def _run_task(
                             from app.core.redis_client import check_cancel_flag
                             if await check_cancel_flag(task_id):
                                 raise TaskCancelledException(f"任务 {task_id} 已被取消（Redis 标志）")
+
+                        # ===== 阶段 3.5: 生成代码库索引 =====
+                        try:
+                            from app.services.codebase_indexer import generate_codebase_index
+                            await generate_codebase_index(repo_id, db)
+                            logger.info(f"[Task] 代码库索引生成完成: repo_id={repo_id}")
+                        except Exception as _idx_err:
+                            logger.warning(f"[Task] 代码库索引生成失败（不影响主流程）: {_idx_err}")
 
                         wiki_id = await generate_wiki(
                             db, repo_id, llm_provider, llm_model,
@@ -295,6 +302,14 @@ async def _run_task(
                         commit_hash=head_commit_hash,
                         progress_callback=_embed_progress,
                     )
+
+                # ===== 阶段 3.5: 生成代码库索引 =====
+                try:
+                    from app.services.codebase_indexer import generate_codebase_index
+                    await generate_codebase_index(repo_id, db)
+                    logger.info(f"[Task] 代码库索引生成完成: repo_id={repo_id}")
+                except Exception as _idx_err:
+                    logger.warning(f"[Task] 代码库索引生成失败（不影响主流程）: {_idx_err}")
 
                 # ===== 阶段 4: Wiki 生成 =====
                 _stage = "generating"
