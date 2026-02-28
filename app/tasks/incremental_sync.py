@@ -245,12 +245,15 @@ def _get_pending_commits_sync(repo_path: str, branch: str = "main") -> list:
     )
 
     # Step 2: git log（使用 ASCII RS \x1e 作分隔符，避免提交信息中的 | 破坏解析）
+    # encoding="utf-8" 是必须的：Git for Windows 输出 UTF-8，Windows 默认 ANSI 码页会导致解码失败
     result = subprocess.run(
         ["git", "log", f"HEAD..origin/{branch}",
          "--format=%H\x1e%s\x1e%an\x1e%ad", "--date=short"],
         cwd=repo_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
 

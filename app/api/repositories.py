@@ -546,8 +546,8 @@ async def get_pending_commits(
     except _asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="获取提交列表超时")
     except Exception as e:
-        logger.warning(f"[RepoAPI] 获取 pending commits 失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取提交列表失败: {e}")
+        logger.exception(f"[RepoAPI] 获取 pending commits 失败: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"获取提交列表失败: {type(e).__name__}: {e}")
 
     return {
         "repo_id": repo_id,
