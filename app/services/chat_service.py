@@ -6,8 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.query_fusion import fuse_query
-from app.services.two_stage_retriever import stage1_discovery, stage2_assembly
+from app.services.two_stage_retriever import stage1_discovery, stage2_assembly, read_file_context
 from app.services.conversation_memory import create_session, get_history, append_turn, session_exists
+from app.services.retrieval_planner import is_broad_query, plan_retrieval
 from app.services.token_budget import apply_token_budget, estimate_tokens
 from app.services.llm.factory import create_adapter
 from app.schemas.llm import LLMMessage
@@ -125,6 +126,19 @@ async def _get_repo_name(db: AsyncSession, repo_id: str) -> str:
     return repo_id
 
 
+async def _get_codebase_index_text(db: AsyncSession, repo_id: str) -> Optional[str]:
+    """加载代码库索引并格式化为文本，用于注入 system prompt 和检索规划"""
+    try:
+        from app.models.repo_index import RepoIndex
+        from app.services.codebase_indexer import format_codebase_index
+        repo_index = await db.get(RepoIndex, repo_id)
+        if repo_index and repo_index.index_json:
+            return format_codebase_index(repo_index.index_json)
+    except Exception as e:
+        logger.debug(f"[ChatService] 无法加载代码库索引: {e}")
+    return None
+
+
 async def handle_chat(
     db: AsyncSession,
     repo_id: str,
@@ -167,11 +181,26 @@ async def handle_chat(
     # 4. Stage 2: 获取完整代码（选取前 10 个最相关的）
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
-    rag_context = "\n\n---\n\n".join(code_contents)
 
-    # 5. Token 预算管理
+    # 5. Token 预算管理 + 代码库索引注入
     repo_name = await _get_repo_name(db, repo_id)
+    codebase_index_text = await _get_codebase_index_text(db, repo_id)
     system_prompt = CHAT_SYSTEM_PROMPT.format(repo_name=repo_name)
+    if codebase_index_text:
+        system_prompt += f"\n\n{codebase_index_text}"
+
+    # 检索规划：对宽泛查询，使用 LLM 识别目标文件并直接读取
+    if codebase_index_text and is_broad_query(fused_query):
+        planned_files = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
+        for planned_fp in planned_files[:3]:  # 最多 3 个文件，控制 token
+            try:
+                fc = read_file_context(repo_id, planned_fp, 1, 300)  # 前 300 行
+                code_contents.insert(0, f"// [TARGETED FILE] {planned_fp}\n{fc.content}")
+                logger.info(f"[ChatService] 规划检索追加文件: {planned_fp}")
+            except Exception as _fe:
+                logger.debug(f"[ChatService] 规划文件读取失败 {planned_fp}: {_fe}")
+
+    rag_context = "\n\n---\n\n".join(code_contents)
     trimmed_history, trimmed_context = apply_token_budget(
         history, model, system_prompt, rag_context, query
     )
@@ -277,11 +306,27 @@ async def handle_chat_stream(
     guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
+
+    # 4. Token 预算管理 + 代码库索引注入
+    repo_name = await _get_repo_name(db, repo_id)
+    codebase_index_text = await _get_codebase_index_text(db, repo_id)
+    system_prompt = CHAT_SYSTEM_PROMPT.format(repo_name=repo_name)
+    if codebase_index_text:
+        system_prompt += f"\n\n{codebase_index_text}"
+
+    # 检索规划：对宽泛查询，使用 LLM 识别目标文件并直接读取
+    if codebase_index_text and is_broad_query(fused_query):
+        planned_files = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
+        for planned_fp in planned_files[:3]:  # 最多 3 个文件，控制 token
+            try:
+                fc = read_file_context(repo_id, planned_fp, 1, 300)  # 前 300 行
+                code_contents.insert(0, f"// [TARGETED FILE] {planned_fp}\n{fc.content}")
+                logger.info(f"[ChatService] 规划检索追加文件: {planned_fp}")
+            except Exception as _fe:
+                logger.debug(f"[ChatService] 规划文件读取失败 {planned_fp}: {_fe}")
+
     rag_context = "\n\n---\n\n".join(code_contents)
 
-    # 4. Token 预算管理
-    repo_name = await _get_repo_name(db, repo_id)
-    system_prompt = CHAT_SYSTEM_PROMPT.format(repo_name=repo_name)
     trimmed_history, trimmed_context = apply_token_budget(
         history, model, system_prompt, rag_context, query
     )
@@ -403,10 +448,25 @@ async def handle_deep_research_stream(
     guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
-    rag_context = "\n\n---\n\n".join(code_contents)
 
-    # 6. 组装系统 prompt
+    # 6. 组装系统 prompt + 代码库索引注入
+    codebase_index_text = await _get_codebase_index_text(db, repo_id)
     system_prompt = DEEP_RESEARCH_SYSTEM_PROMPT.format(repo_name=repo_name)
+    if codebase_index_text:
+        system_prompt += f"\n\n{codebase_index_text}"
+
+    # 检索规划：第1轮或宽泛查询时，使用 LLM 识别目标文件并直接读取
+    if codebase_index_text and (is_first or is_broad_query(fused_query)):
+        planned_files = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
+        for planned_fp in planned_files[:3]:  # 最多 3 个文件，控制 token
+            try:
+                fc = read_file_context(repo_id, planned_fp, 1, 300)  # 前 300 行
+                code_contents.insert(0, f"// [TARGETED FILE] {planned_fp}\n{fc.content}")
+                logger.info(f"[DeepResearch] 规划检索追加文件: {planned_fp}")
+            except Exception as _fe:
+                logger.debug(f"[DeepResearch] 规划文件读取失败 {planned_fp}: {_fe}")
+
+    rag_context = "\n\n---\n\n".join(code_contents)
 
     # 7. 组装用户 prompt（当前轮的指令）
     if is_first:
