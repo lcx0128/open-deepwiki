@@ -441,6 +441,8 @@ onMounted(loadRepos)
           拉取最新代码、仅重新处理变更文件并更新 Wiki。
           <br><br>
           <strong>同步期间将暂时无法查看 Wiki。</strong>
+          <br>
+          <strong>若当前仓库更新过多，建议点击重新生成按钮进行全量更新，增量更新只适合大纲改动不大的场景</strong>
         </p>
 
         <!-- 待同步提交查看器 -->
