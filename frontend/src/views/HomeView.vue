@@ -4,6 +4,7 @@ import type { TaskState } from '@/stores/task'
 import { submitRepository, getTaskStatus } from '@/api/repositories'
 import { useTaskStore } from '@/stores/task'
 import { useEventSource } from '@/composables/useEventSource'
+import { getSystemConfig } from '@/api/system'
 import ProgressBar from '@/components/ProgressBar.vue'
 
 const taskStore = useTaskStore()
@@ -111,6 +112,15 @@ onMounted(async () => {
     }
   }
   history.replaceState(null, '', window.location.pathname)
+
+  // 加载已保存的系统配置，预填充 LLM 供应商和模型
+  try {
+    const cfg = await getSystemConfig()
+    if (cfg.is_customized) {
+      if (cfg.llm.default_provider) llmProvider.value = cfg.llm.default_provider
+      if (cfg.llm.default_model)    llmModel.value    = cfg.llm.default_model
+    }
+  } catch { /* 后端不可用时静默忽略，保持默认空值 */ }
 })
 
 // 提交仓库

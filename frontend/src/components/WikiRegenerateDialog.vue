@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import type { WikiResponse } from '@/api/wiki'
+import { getSystemConfig } from '@/api/system'
 
 const props = defineProps<{
   wiki: WikiResponse | null
@@ -9,7 +10,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
-  confirm: [payload: { mode: 'full' | 'partial'; pageIds: string[] }]
+  confirm: [payload: { mode: 'full' | 'partial'; pageIds: string[]; llmProvider: string; llmModel: string }]
   cancel: []
 }>()
 
@@ -54,6 +55,20 @@ watch(
   { immediate: true }
 )
 
+const llmProvider = ref('')
+const llmModel = ref('')
+const showLlmOptions = ref(false)
+
+onMounted(async () => {
+  try {
+    const cfg = await getSystemConfig()
+    if (cfg.is_customized) {
+      if (cfg.llm.default_provider) llmProvider.value = cfg.llm.default_provider
+      if (cfg.llm.default_model)    llmModel.value    = cfg.llm.default_model
+    }
+  } catch { /* 静默忽略 */ }
+})
+
 function getSectionState(sectionId: string): 'all' | 'some' | 'none' {
   if (!props.wiki) return 'none'
   const section = props.wiki.sections.find(s => s.id === sectionId)
@@ -97,6 +112,8 @@ function handleConfirm() {
   emit('confirm', {
     mode: mode.value,
     pageIds: mode.value === 'partial' ? [...selectedPageIds.value] : [],
+    llmProvider: llmProvider.value,
+    llmModel: llmModel.value,
   })
 }
 
@@ -162,6 +179,34 @@ function setSectionIndeterminate(el: HTMLInputElement | null, sectionId: string)
                   <span class="regen-mode__desc">仅重新生成选中的页面</span>
                 </div>
               </label>
+            </div>
+
+            <!-- LLM 配置（可选） -->
+            <div class="regen-llm-section">
+              <button type="button" class="regen-llm-toggle" @click="showLlmOptions = !showLlmOptions">
+                <svg class="regen-llm-chevron" :class="{ 'regen-llm-chevron--open': showLlmOptions }"
+                     viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                LLM 供应商配置
+                <span class="regen-llm-badge">{{ showLlmOptions ? '收起' : llmProvider ? llmProvider : '可选' }}</span>
+              </button>
+              <div v-if="showLlmOptions" class="regen-llm-body">
+                <div class="regen-llm-row">
+                  <label class="regen-llm-label">供应商</label>
+                  <select v-model="llmProvider" class="regen-llm-select">
+                    <option value="">默认（环境变量配置）</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="dashscope">DashScope（阿里云）</option>
+                    <option value="gemini">Google Gemini</option>
+                    <option value="custom">自定义本地模型</option>
+                  </select>
+                </div>
+                <div class="regen-llm-row">
+                  <label class="regen-llm-label">模型</label>
+                  <input v-model="llmModel" class="regen-llm-input" placeholder="如 gpt-4o / qwen-plus" />
+                </div>
+              </div>
             </div>
 
             <!-- Page tree (partial mode only) -->
@@ -503,6 +548,91 @@ function setSectionIndeterminate(el: HTMLInputElement | null, sectionId: string)
 [data-theme="dark"] .regen-modal__footer {
   background: #161616;
 }
+
+/* LLM options */
+.regen-llm-section {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.regen-llm-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px;
+  background: var(--bg-secondary);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.regen-llm-toggle:hover { background: var(--bg-hover); }
+
+.regen-llm-chevron {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  transition: transform 0.18s;
+  color: var(--text-muted);
+}
+
+.regen-llm-chevron--open { transform: rotate(180deg); }
+
+.regen-llm-badge {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-light, rgba(99,102,241,0.1));
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.regen-llm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.regen-llm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.regen-llm-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  width: 42px;
+  flex-shrink: 0;
+}
+
+.regen-llm-select,
+.regen-llm-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.regen-llm-select:focus,
+.regen-llm-input:focus { border-color: var(--color-primary); }
 
 /* Transition */
 .regen-fade-enter-active,

@@ -140,13 +140,14 @@ function handleRegenerate() {
   showRegenerateDialog.value = true
 }
 
-async function handleRegenerateConfirm(payload: { mode: 'full' | 'partial'; pageIds: string[] }) {
+async function handleRegenerateConfirm(payload: { mode: 'full' | 'partial'; pageIds: string[]; llmProvider: string; llmModel: string }) {
   showRegenerateDialog.value = false
   isRegenerating.value = true
   try {
-    const requestData = payload.mode === 'partial'
-      ? { pages: payload.pageIds }
-      : {}
+    const requestData: { pages?: string[]; llm_provider?: string; llm_model?: string } = {}
+    if (payload.mode === 'partial') requestData.pages = payload.pageIds
+    if (payload.llmProvider) requestData.llm_provider = payload.llmProvider
+    if (payload.llmModel)    requestData.llm_model    = payload.llmModel
     const result = await regenerateWiki(props.repoId, requestData)
     taskStore.setTask({
       id: result.task_id,
