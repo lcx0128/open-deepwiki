@@ -4,8 +4,10 @@ import {
   getSystemConfig, updateSystemConfig,
   getSystemHealth, getSystemTasks, cancelTask,
   getStorageStats, scanCleanup, executeCleanup,
+  testLlmConnection,
   type SystemConfig, type HealthResponse, type TaskItem, type TaskListResponse,
   type StorageResponse, type CleanupScanResponse,
+  type TestConnectionRequest, type TestConnectionResponse,
 } from '@/api/system'
 
 // ── Tab state ────────────────────────────────────────────────────────────────
@@ -21,6 +23,32 @@ const configError = ref('')
 const showEmbedding = ref(false)
 const isFirstTime = ref(false)  // true when system_config.json has no overrides yet
 const showPasswords = ref<Record<string, boolean>>({})  // keyed by field id
+
+// Connection test state per provider key
+const testResults = ref<Record<string, { loading: boolean; result: TestConnectionResponse | null }>>({})
+const testModels = ref<Record<string, string>>({
+  openai: 'gpt-5',
+  dashscope: 'qwen-plus',
+  gemini: 'gemini-3-flash-preview',
+  custom: '',
+})
+
+async function testConnection(provider: string, apiKey: string, baseUrl: string, model: string) {
+  const key = provider
+  testResults.value[key] = { loading: true, result: null }
+  try {
+    const req: TestConnectionRequest = {
+      provider,
+      api_key: apiKey || undefined,
+      base_url: baseUrl || undefined,
+      model: model || undefined,
+    }
+    const result = await testLlmConnection(req)
+    testResults.value[key] = { loading: false, result }
+  } catch {
+    testResults.value[key] = { loading: false, result: { success: false, latency_ms: null, error: '请求失败' } }
+  }
+}
 
 function togglePassword(fieldId: string) {
   showPasswords.value[fieldId] = !showPasswords.value[fieldId]
@@ -413,6 +441,18 @@ onMounted(() => {
             </div>
           </div>
 
+          <div class="test-row">
+            <input v-model="testModels['openai']" class="form-input test-model-input" placeholder="测试用模型名，如 gpt-4o-mini" />
+            <button type="button" class="btn-test" :disabled="testResults['openai']?.loading" @click="testConnection('openai', llmForm.openai_api_key, llmForm.openai_base_url, testModels['openai'])">
+              <span v-if="testResults['openai']?.loading" class="test-spinner"/>
+              <span v-else>连通性测试</span>
+            </button>
+            <span v-if="testResults['openai']?.result" class="test-result" :class="testResults['openai'].result.success ? 'test-result--ok' : 'test-result--err'">
+              <template v-if="testResults['openai'].result.success">✓ {{ testResults['openai'].result.latency_ms }}ms</template>
+              <template v-else>✗ {{ testResults['openai'].result.error }}</template>
+            </span>
+          </div>
+
           <h3 class="subsection-title">DashScope（阿里云）</h3>
           <div class="form-grid">
             <div class="form-group">
@@ -433,6 +473,18 @@ onMounted(() => {
             </div>
           </div>
 
+          <div class="test-row">
+            <input v-model="testModels['dashscope']" class="form-input test-model-input" placeholder="测试用模型名，如 qwen-plus" />
+            <button type="button" class="btn-test" :disabled="testResults['dashscope']?.loading" @click="testConnection('dashscope', llmForm.dashscope_api_key, '', testModels['dashscope'])">
+              <span v-if="testResults['dashscope']?.loading" class="test-spinner"/>
+              <span v-else>连通性测试</span>
+            </button>
+            <span v-if="testResults['dashscope']?.result" class="test-result" :class="testResults['dashscope'].result.success ? 'test-result--ok' : 'test-result--err'">
+              <template v-if="testResults['dashscope'].result.success">✓ {{ testResults['dashscope'].result.latency_ms }}ms</template>
+              <template v-else>✗ {{ testResults['dashscope'].result.error }}</template>
+            </span>
+          </div>
+
           <h3 class="subsection-title">Google Gemini</h3>
           <div class="form-grid">
             <div class="form-group">
@@ -451,6 +503,18 @@ onMounted(() => {
                 </button>
               </div>
             </div>
+          </div>
+
+          <div class="test-row">
+            <input v-model="testModels['gemini']" class="form-input test-model-input" placeholder="测试用模型名，如 gemini-1.5-flash" />
+            <button type="button" class="btn-test" :disabled="testResults['gemini']?.loading" @click="testConnection('gemini', llmForm.google_api_key, '', testModels['gemini'])">
+              <span v-if="testResults['gemini']?.loading" class="test-spinner"/>
+              <span v-else>连通性测试</span>
+            </button>
+            <span v-if="testResults['gemini']?.result" class="test-result" :class="testResults['gemini'].result.success ? 'test-result--ok' : 'test-result--err'">
+              <template v-if="testResults['gemini'].result.success">✓ {{ testResults['gemini'].result.latency_ms }}ms</template>
+              <template v-else>✗ {{ testResults['gemini'].result.error }}</template>
+            </span>
           </div>
 
           <h3 class="subsection-title">自定义本地模型</h3>
@@ -479,6 +543,18 @@ onMounted(() => {
                 </button>
               </div>
             </div>
+          </div>
+
+          <div class="test-row">
+            <input v-model="testModels['custom']" class="form-input test-model-input" placeholder="测试用模型名（必填）" />
+            <button type="button" class="btn-test" :disabled="testResults['custom']?.loading" @click="testConnection('custom', llmForm.custom_api_key, llmForm.custom_base_url, testModels['custom'])">
+              <span v-if="testResults['custom']?.loading" class="test-spinner"/>
+              <span v-else>连通性测试</span>
+            </button>
+            <span v-if="testResults['custom']?.result" class="test-result" :class="testResults['custom'].result.success ? 'test-result--ok' : 'test-result--err'">
+              <template v-if="testResults['custom'].result.success">✓ {{ testResults['custom'].result.latency_ms }}ms</template>
+              <template v-else>✗ {{ testResults['custom'].result.error }}</template>
+            </span>
           </div>
 
           <div class="divider" />
@@ -1690,4 +1766,67 @@ onMounted(() => {
 }
 .pw-toggle-btn:hover { color: var(--text-secondary); }
 .pw-toggle-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+/* ── Connection test row ──────────────────────────────────────────────────── */
+.test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+.test-model-input {
+  flex: 1;
+  max-width: 260px;
+  padding: 5px 10px;
+  font-size: 13px;
+}
+
+.btn-test {
+  padding: 5px 14px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+}
+
+.btn-test:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-color-strong);
+}
+
+.btn-test:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.test-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--border-color-strong);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.test-result {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.test-result--ok { color: var(--color-success, #16a34a); }
+.test-result--err { color: var(--color-error, #dc2626); }
 </style>

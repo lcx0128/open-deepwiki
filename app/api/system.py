@@ -324,12 +324,18 @@ async def list_tasks(
     count_query = select(func.count(Task.id))
 
     if status:
-        try:
-            status_enum = TaskStatus(status)
-            query = query.where(Task.status == status_enum)
-            count_query = count_query.where(Task.status == status_enum)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"无效状态值: {status}")
+        if status == 'running':
+            # "running" is a frontend alias for all active (non-terminal) statuses
+            active_statuses = [s for s in TaskStatus if s not in _TERMINAL_STATUSES]
+            query = query.where(Task.status.in_(active_statuses))
+            count_query = count_query.where(Task.status.in_(active_statuses))
+        else:
+            try:
+                status_enum = TaskStatus(status)
+                query = query.where(Task.status == status_enum)
+                count_query = count_query.where(Task.status == status_enum)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效状态值: {status}")
 
     total_result = await db.execute(count_query)
     total = total_result.scalar_one()
@@ -526,3 +532,74 @@ async def cleanup_execute(db: AsyncSession = Depends(get_db)):
         "reclaimed_bytes": reclaimed_bytes,
         "reclaimed_human": _format_size(reclaimed_bytes),
     }
+
+
+@router.post("/config/test", summary="测试 LLM 供应商连通性")
+async def test_llm_connection(body: dict):
+    """
+    使用提供的凭证测试 LLM 供应商的 API 连通性。
+    如果 api_key 以 "****" 开头（脱敏值），则自动使用已保存的实际密钥。
+    """
+    provider = (body.get("provider") or "").lower()
+    api_key = body.get("api_key") or ""
+    base_url = body.get("base_url") or ""
+    model = body.get("model") or ""
+
+    cfg = await asyncio.to_thread(get_effective_config)
+
+    # Resolve masked or empty api_key → use stored config
+    if not api_key or api_key.startswith("****"):
+        key_map = {
+            "openai": cfg.get("OPENAI_API_KEY", ""),
+            "dashscope": cfg.get("DASHSCOPE_API_KEY", ""),
+            "gemini": cfg.get("GOOGLE_API_KEY", ""),
+            "custom": cfg.get("CUSTOM_LLM_API_KEY", ""),
+        }
+        api_key = key_map.get(provider, "") or ""
+
+    # Resolve empty base_url → use stored config or provider default
+    if not base_url:
+        url_map = {
+            "openai": cfg.get("OPENAI_BASE_URL", "") or "",
+            "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "custom": cfg.get("CUSTOM_LLM_BASE_URL", "") or "",
+        }
+        base_url = url_map.get(provider, "") or ""
+
+    # Resolve empty model — use the globally configured default model.
+    # Do NOT use hardcoded provider-specific names: third-party proxies may not
+    # support them. If no model can be determined, ask the user to configure one.
+    if not model:
+        model = cfg.get("DEFAULT_LLM_MODEL") or ""
+    if not model:
+        return {"success": False, "latency_ms": None, "error": "请先在「默认模型名称」中填写模型名再测试"}
+
+    if not api_key:
+        return {"success": False, "latency_ms": None, "error": "未配置 API Key"}
+
+    def _do_test() -> dict:
+        from openai import OpenAI, APIConnectionError, AuthenticationError, APIStatusError
+        try:
+            kwargs: dict = {"api_key": api_key, "timeout": 10.0}
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = OpenAI(**kwargs)
+            t0 = time.monotonic()
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=1,
+            )
+            latency = round((time.monotonic() - t0) * 1000)
+            return {"success": True, "latency_ms": latency, "error": None}
+        except AuthenticationError:
+            return {"success": False, "latency_ms": None, "error": "认证失败：API Key 无效或已过期"}
+        except APIConnectionError as e:
+            return {"success": False, "latency_ms": None, "error": f"连接失败：{str(e)[:120]}"}
+        except APIStatusError as e:
+            return {"success": False, "latency_ms": None, "error": f"API 错误 {e.status_code}：{str(e.message)[:120]}"}
+        except Exception as e:
+            return {"success": False, "latency_ms": None, "error": str(e)[:200]}
+
+    return await asyncio.to_thread(_do_test)

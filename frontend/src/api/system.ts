@@ -150,3 +150,21 @@ export async function executeCleanup(): Promise<CleanupExecuteResponse> {
   const response = await apiClient.post<CleanupExecuteResponse>('/system/cleanup/execute')
   return response.data
 }
+
+export interface TestConnectionRequest {
+  provider: string
+  api_key?: string
+  base_url?: string
+  model?: string
+}
+
+export interface TestConnectionResponse {
+  success: boolean
+  latency_ms: number | null
+  error: string | null
+}
+
+export async function testLlmConnection(req: TestConnectionRequest): Promise<TestConnectionResponse> {
+  const response = await apiClient.post<TestConnectionResponse>('/system/config/test', req)
+  return response.data
+}
