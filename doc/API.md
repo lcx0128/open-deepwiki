@@ -478,6 +478,198 @@ es.onmessage = (event) => {
 
 ---
 
+## 系统管理接口
+
+> 所有端点前缀为 `/api/system`，由 `app/api/system.py` 实现。
+
+### GET /api/system/config
+
+获取当前生效的系统配置，API Key 已脱敏（仅保留末 4 位，前缀显示 `****`）。
+
+**响应示例**:
+```json
+{
+    "llm": {
+        "default_provider": "dashscope",
+        "default_model": "qwen-plus",
+        "openai_api_key": "****3f9a",
+        "openai_base_url": "",
+        "dashscope_api_key": "****cedf",
+        "google_api_key": "",
+        "custom_base_url": "",
+        "custom_api_key": ""
+    },
+    "embedding": {
+        "api_key": "****cedf",
+        "base_url": "",
+        "model": "text-embedding-v3"
+    },
+    "wiki_language": "Chinese",
+    "is_customized": true
+}
+```
+
+`is_customized` 为 `false` 时表示尚未通过面板保存过配置，当前值来自 `.env`。
+
+---
+
+### PUT /api/system/config
+
+更新系统配置，写入 `data/system_config.json`，立即生效（无需重启）。
+
+**请求体**（所有字段可选，仅传需修改的字段）:
+```json
+{
+    "llm": {
+        "default_provider": "openai",
+        "default_model": "gpt-4o",
+        "openai_api_key": "sk-xxxx"
+    },
+    "wiki_language": "English"
+}
+```
+
+**响应**: `{ "status": "ok" }`
+
+> 若某字段值为脱敏格式（如 `****cedf`），后端自动忽略该字段，保留已存储的真实值。
+
+---
+
+### POST /api/system/config/test
+
+使用指定凭证测试 LLM 供应商 API 连通性，发送一次 `max_tokens=1` 的 Chat Completions 请求。
+
+**请求体**:
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `provider` | string | 是 | `openai` / `dashscope` / `gemini` / `custom` |
+| `api_key` | string | 否 | 留空或传脱敏值时自动读取已保存的真实 Key |
+| `base_url` | string | 否 | 留空时使用供应商默认地址 |
+| `model` | string | 否 | 测试使用的模型名；留空时读取 `DEFAULT_LLM_MODEL`，仍为空则返回错误 |
+
+**响应示例（成功）**:
+```json
+{ "success": true, "latency_ms": 843, "error": null }
+```
+
+**响应示例（失败）**:
+```json
+{ "success": false, "latency_ms": null, "error": "AuthenticationError: Incorrect API key" }
+```
+
+---
+
+### GET /api/system/health
+
+并发检查各服务健康状态。
+
+**响应示例**:
+```json
+{
+    "services": {
+        "database": { "status": "ok" },
+        "redis":    { "status": "ok" },
+        "chromadb": { "status": "ok" },
+        "celery":   { "status": "ok", "active_tasks": 1 }
+    }
+}
+```
+
+`status` 可选值：`ok` / `error` / `offline` / `unknown`
+
+---
+
+### GET /api/system/tasks
+
+分页查询任务列表，支持按状态筛选。
+
+**Query 参数**:
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `page` | int | 页码，默认 1 |
+| `per_page` | int | 每页条数，默认 15 |
+| `status` | string | 状态筛选；`running` 为特殊值，映射为所有活跃状态（`pending/cloning/parsing/embedding/generating`） |
+
+**响应示例**:
+```json
+{
+    "items": [
+        {
+            "id": "uuid",
+            "repo_id": "uuid",
+            "repo_url": "https://github.com/owner/repo",
+            "type": "full_process",
+            "status": "completed",
+            "progress_pct": 100,
+            "current_stage": "处理完成",
+            "created_at": "2026-03-01T12:00:00Z",
+            "completed_at": "2026-03-01T12:05:00Z"
+        }
+    ],
+    "total": 42,
+    "page": 1,
+    "per_page": 15,
+    "pages": 3
+}
+```
+
+---
+
+### POST /api/system/tasks/{task_id}/cancel
+
+取消指定任务。已处于终态（`completed`/`failed`/`cancelled`/`interrupted`）的任务返回 400。
+
+**响应**: `{ "status": "ok", "task_id": "uuid" }`
+
+---
+
+### GET /api/system/storage
+
+查询各存储目录磁盘占用。
+
+**响应示例**:
+```json
+{
+    "repos": { "path": "./repos", "size_bytes": 52428800, "size_human": "50.0 MB" },
+    "chromadb": { "path": "./data/chromadb", "size_bytes": 10485760, "size_human": "10.0 MB" },
+    "database": { "path": "./data/deepwiki.db", "size_bytes": 1048576, "size_human": "1.0 MB" },
+    "total_human": "61.0 MB"
+}
+```
+
+---
+
+### POST /api/system/cleanup/scan
+
+扫描孤儿数据（不属于任何仓库的 `repos/` 目录和 ChromaDB 集合），只读预览，不执行删除。
+
+**响应示例**:
+```json
+{
+    "orphan_dirs": ["repos/abc123", "repos/def456"],
+    "orphan_collections": ["col_abc123"],
+    "orphan_count": 3
+}
+```
+
+---
+
+### POST /api/system/cleanup/execute
+
+重新扫描并删除孤儿数据，返回清理结果。
+
+**响应示例**:
+```json
+{
+    "cleaned_dirs": 2,
+    "cleaned_collections": 1,
+    "reclaimed_bytes": 62914560,
+    "reclaimed_human": "60.0 MB"
+}
+```
+
+---
+
 ## 错误恢复指南
 
 ### 故障场景与推荐操作

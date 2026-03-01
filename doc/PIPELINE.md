@@ -89,7 +89,7 @@ pending
 
 ### INCREMENTAL_SYNC 的特殊规则
 
-- 若 0 个文件变更（全部 hash 匹配） → 直接进入 `embedding` 阶段（跳过），然后 `generating`，最终 `completed`
+- 若 0 个文件变更（全部 hash 匹配） → 跳过 `embedding`、跳过 `generating`（Wiki 不重生成），直接 `completed`
 - INCREMENTAL_SYNC 允许 chunks = 0（表示无变更），不视为失败
 
 ---
@@ -228,16 +228,20 @@ INCREMENTAL_SYNC 触发（通过 /sync 端点或重新提交同 URL）
   │     ├── git fetch origin {branch}
   │     ├── git diff HEAD..origin/{branch} --name-status → 获取变更文件列表
   │     ├── git merge origin/{branch} → 拉取最新代码
-  │     └── ChromaDB 清理: 删除状态为 'D' 的文件对应的所有 chunk 向量
+  │     ├── ChromaDB 清理: 删除状态为 'D' 的文件对应的所有 chunk 向量
+  │     └── 代码库索引增量更新: update_codebase_index_for_files()（仅变更文件）
   │
   └── Stage 2-4: 正常四阶段流程（force_full=False）
         ├── Parser: 文件 hash 未变 → 跳过（FileState 命中）
         ├── Parser: 文件 hash 已变 → 重新解析
         ├── Embedder: 仅处理变更文件 chunks，更新 FileState
-        └── Stage 4 (Wiki): update_wiki_incrementally()
-              ├── 脏页比例 ≤ 65% → 增量更新脏页，保留干净页
-              ├── 脏页比例 > 65% → 不更新，返回建议全量重生成
-              └── Wiki 不存在   → 调用 generate_wiki() 全量生成
+        ├── Stage 3.5 (代码库索引): 增量同步时跳过（已在 Stage 1 完成）
+        └── Stage 4 (Wiki):
+              ├── 有变更文件 → update_wiki_incrementally()
+              │     ├── 脏页比例 ≤ 65% → 增量更新脏页，保留干净页
+              │     ├── 脏页比例 > 65% → 不更新，返回建议全量重生成
+              │     └── Wiki 不存在   → 调用 generate_wiki() 全量生成
+              └── 无变更文件 → 跳过 Wiki 生成，直接 completed
 ```
 
 ### Stage 1 分支逻辑（process_repo.py）
@@ -277,7 +281,7 @@ else:
 
 ### INCREMENTAL_SYNC 允许 chunks=0
 
-若所有文件 hash 均未变更，Parser 返回空 chunks，Embedder 无写入。Stage 4 仍会调用 `update_wiki_incrementally()`，此时脏页列表为空，直接返回不更新（跳过 Wiki 生成）。这是合法状态，不视为失败。
+若所有文件 hash 均未变更，Parser 返回空 chunks，Embedder 无写入，Stage 3.5 代码库索引已在 Stage 1 增量更新（无变更则跳过），Stage 4 Wiki 生成直接跳过，任务直接置为 `completed`。这是合法状态，不视为失败。
 
 ### repo.status 生命周期（增量）
 
