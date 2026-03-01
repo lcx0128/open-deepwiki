@@ -390,15 +390,21 @@ QUICK_START_OVERVIEW_PROMPT = """你是一位技术文档专家，请为这个�
 ## 快速开始
 根据下方提供的 README、依赖文件和 Docker 配置，按以下规则生成本节内容：
 
-**规则 1 — Docker 部署**（若存在 Dockerfile 或 docker-compose 文件）：
+**规则 1 — Docker 部署**（若 dep_context 中存在 Dockerfile 或 docker-compose 文件内容）：
 - 用 ### Docker 部署 作为子标题
-- 提供完整的启动命令，用代码块展示（如 `docker-compose up -d` 或 `docker build` + `docker run`）
-- 列出必要的环境变量配置步骤（可参考 .env.example）
+- **必须解析 dep_context 中提供的实际文件内容**，提取真实的服务名、端口映射和启动命令，而非使用通用示例
+  - docker-compose 场景：列出主要服务及其端口，给出准确的 `docker-compose up` 命令（含 `-d` 等常用参数）
+  - 仅有 Dockerfile 场景：给出准确的 `docker build -t <镜像名> .` 和 `docker run` 命令（含端口映射 `-p`）
+- 若 dep_context 中有 .env.example：列出关键环境变量并说明如何复制配置文件
+- 即使 README 没有部署说明，只要有 Docker 文件内容就必须生成此节
 
 **规则 2 — 本地部署**：
 - 用 ### 本地部署 作为子标题
 - 若 README 有明确步骤：直接提炼，保留原始命令并放入代码块
-- 若 README 无明确步骤：根据依赖文件推断标准流程（如 `pip install -r requirements.txt`、`npm install` 等），在末尾注明"⚠️ 以上步骤根据项目结构推断，具体请以项目文档为准"
+- 若 README 无明确步骤（或无 README）：**综合利用以下信息推断**：
+  1. dep_context 中的依赖文件类型（requirements.txt → pip，package.json → npm/yarn，go.mod → go run，pom.xml → mvn，Cargo.toml → cargo）
+  2. file_tree 中的入口文件（如 main.py、app.py、manage.py、index.js、server.go 等）确定启动命令
+  3. 在末尾注明"⚠️ 以上步骤根据项目结构推断，具体请以项目文档为准"
 
 **规则 3 — 格式要求**：
 - 所有终端命令必须用 ``` 代码块包裹
