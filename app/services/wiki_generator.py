@@ -468,19 +468,31 @@ def _get_quick_start_section(language: str) -> dict:
 
 
 async def _get_dependency_context(repo) -> str:
-    """读取仓库依赖文件及部署配置，提取技术栈版本与部署信息（每个文件最多3000字符）"""
+    """读取仓库依赖文件、部署配置及入口文件，提供准确的启动命令上下文（避免 LLM 推断错误）"""
     local_path = repo.local_path if repo and repo.local_path else ""
     if not local_path:
         return "(no dependency files found)"
-    candidates = [
+
+    # 依赖 & 部署配置（读取较多字符，版本信息和 docker-compose 内容较长）
+    dep_candidates = [
         "requirements.txt", "requirements-dev.txt", "requirements-prod.txt",
         "pyproject.toml", "setup.py", "Pipfile",
         "frontend/package.json", "package.json",
         "go.mod", "pom.xml", "build.gradle", "Cargo.toml",
         "Dockerfile", "docker-compose.yml", "docker-compose.yaml", ".env.example",
     ]
+    # 入口文件 & 启动脚本（读取头部足够判断启动命令，限800字符避免 prompt 膨胀）
+    entry_candidates = [
+        "Procfile", "Makefile", "start.sh", "run.sh", "entrypoint.sh",
+        "main.py", "app.py", "app/main.py", "src/main.py",
+        "manage.py", "server.py", "run.py", "wsgi.py", "asgi.py",
+        "index.js", "server.js", "app.js",
+        "src/index.js", "src/server.js", "src/main.js",
+        "main.go", "cmd/main.go",
+    ]
+
     dep_files = []
-    for fname in candidates:
+    for fname in dep_candidates:
         fpath = os.path.join(local_path, fname)
         if os.path.exists(fpath):
             try:
@@ -489,7 +501,24 @@ async def _get_dependency_context(repo) -> str:
                 dep_files.append(f"### {fname}\n```\n{content}\n```")
             except Exception:
                 pass
-    return "\n\n".join(dep_files) or "(no dependency files found)"
+
+    entry_files = []
+    for fname in entry_candidates:
+        fpath = os.path.join(local_path, fname)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(800)
+                entry_files.append(f"### {fname} (入口文件，仅头部)\n```\n{content}\n```")
+            except Exception:
+                pass
+
+    parts = []
+    if dep_files:
+        parts.append("## 依赖与部署配置\n\n" + "\n\n".join(dep_files))
+    if entry_files:
+        parts.append("## 入口文件（用于推断启动命令）\n\n" + "\n\n".join(entry_files))
+    return "\n\n".join(parts) or "(no dependency files found)"
 
 
 async def _generate_page_summary(
