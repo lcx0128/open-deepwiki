@@ -59,5 +59,7 @@ class WikiPage(Base):
     content_md = Column(Text, nullable=True, comment="生成的 Markdown 内容")
     relevant_files = Column(JSON, nullable=True, comment="关联的源文件路径列表")
     order_index = Column(Integer, nullable=False, default=0)
+    summary = Column(Text, nullable=True, comment="页面摘要（2-3句话），用于快速上手导航页生成")
+    page_type = Column(String(32), nullable=True, comment="页面类型：None=普通页, quick_start_overview=项目概览, quick_start_navigation=内容导航")
 
     section = relationship("WikiSection", back_populates="pages")

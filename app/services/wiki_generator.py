@@ -5,6 +5,7 @@
 import asyncio
 import json as _json
 import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Callable, Dict, Tuple
@@ -173,6 +174,7 @@ File summaries (classes and functions):
 {readme_content_section}
 Output language: {language}
 All section titles, page titles, and any text content in the XML MUST be written in {language}. Do not use any other language.
+IMPORTANT: A "快速上手" (Quick Start) section with non-technical overview will be automatically prepended to the Wiki by the system. Do NOT include any "Quick Start", "Getting Started", "Project Overview", or "Introduction" section. Focus entirely on technical depth.
 
 MANDATORY REQUIREMENTS:
 1. You MUST include a section covering System Architecture with an overview page (importance=high) that MUST contain a Mermaid architecture diagram showing all major modules and their relationships.
@@ -333,6 +335,338 @@ Write a COMPREHENSIVE Markdown page:
 Use ## for main sections, ### for subsections.
 """
 
+# ============================================================
+# 快速上手页面 Prompts
+# ============================================================
+PAGE_SUMMARY_PROMPT = """Analyze this wiki page and write a concise 2-3 sentence summary in {language}.
+
+Page title: {page_title}
+Section: {section_title}
+
+Content (preview):
+{content_preview}
+
+Output ONLY the summary text. No formatting, no headings, no quotes.
+The summary must describe: what topics this page covers and what a reader will learn.
+Keep it under 100 words."""
+
+
+QUICK_START_OVERVIEW_PROMPT = """你是一位技术文档专家，请为这个项目写一个面向新用户的"项目概览"页面。
+
+项目名称：{repo_name}
+编程语言 / 技术栈：{languages}
+
+依赖文件（含版本信息）：
+{dep_context}
+
+项目文件结构（摘要）：
+{file_tree}
+
+{readme_content_section}
+
+输出语言：{language}
+所有内容必须用 {language} 撰写。
+
+---
+
+要求：
+1. 语言简洁友好，面向完全不了解该项目的新用户。
+2. 不要引用任何代码文件路径或行号。
+3. 不要生成任何图表。
+4. 技术栈必须从依赖文件中提取准确版本号（如 FastAPI 0.115.x）。
+5. 若 README 中有相关信息，优先提取，用自己的语言重组，不要照搬。
+
+页面结构（严格按以下顺序，使用 ## 二级标题）：
+
+## 这是什么项目？
+（2-4 句话，说明核心用途和解决的问题）
+
+## 主要功能
+（4-10 个要点，每条 1-2 句话，从用户角度描述"我可以用它做什么"；若有子系统，用 ### 三级标题分组）
+
+## 技术栈
+（列出主要技术及版本，每项附一句"它在本项目中负责……"）
+
+## 快速开始
+（提炼 README 或依赖文件中的安装/运行步骤，若信息不足给出一般性指引）
+
+## 适合哪些用户？
+（目标用户群体和使用场景，2-4 句话）"""
+
+
+QUICK_START_NAVIGATION_PROMPT = """你是一位技术文档专家，请为这个 Wiki 写一个"内容导航"页面，帮助用户快速找到所需内容。
+
+项目名称：{repo_name}
+
+Wiki 各章节页面摘要：
+{summaries_text}
+
+输出语言：{language}
+所有内容必须用 {language} 撰写。
+
+---
+
+请写一个 Markdown 格式的内容导航页：
+
+1. 开篇 2-3 句话说明本 Wiki 的整体组织结构。
+2. 为每个章节写一段导航说明（### 三级标题）：
+   - 一句话说明该章节整体内容
+   - 以"如果你想了解……，请查看**[页面标题]**"格式列出每个页面的导航提示（基于摘要，要具体）
+3. 末尾加"快速定位"两列表格：| 我想了解…… | 推荐查看 |
+
+要求：导航描述要具体（基于摘要），不要空泛；不引用代码文件；不生成图表。"""
+
+
+def _get_quick_start_section(language: str) -> dict:
+    """快速上手章节结构（order=0），含两个固定页面，在大纲注入时使用"""
+    is_chinese = language.lower() in ("chinese", "zh", "zh-cn", "中文")
+    section_title = "快速上手" if is_chinese else "Quick Start"
+    return {
+        "id": "section-quick-start",
+        "title": section_title,
+        "order": 0,
+        "pages": [
+            {
+                "id": "page-quick-start-overview",
+                "title": "项目概览" if is_chinese else "Project Overview",
+                "importance": "high",
+                "relevant_files": [],
+                "order": 0,
+                "page_type": "quick_start_overview",
+            },
+            {
+                "id": "page-quick-start-navigation",
+                "title": "内容导航" if is_chinese else "Content Navigation",
+                "importance": "high",
+                "relevant_files": [],
+                "order": 1,
+                "page_type": "quick_start_navigation",
+            },
+        ],
+    }
+
+
+async def _get_dependency_context(repo) -> str:
+    """读取仓库依赖文件，提取技术栈版本信息（每个文件最多3000字符）"""
+    import os
+    local_path = repo.local_path if repo and repo.local_path else ""
+    if not local_path:
+        return "(no dependency files found)"
+    candidates = [
+        "requirements.txt", "requirements-dev.txt", "requirements-prod.txt",
+        "pyproject.toml", "setup.py", "Pipfile",
+        "frontend/package.json", "package.json",
+        "go.mod", "pom.xml", "build.gradle", "Cargo.toml",
+    ]
+    dep_files = []
+    for fname in candidates:
+        fpath = os.path.join(local_path, fname)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(3000)
+                dep_files.append(f"### {fname}\n```\n{content}\n```")
+            except Exception:
+                pass
+    return "\n\n".join(dep_files) or "(no dependency files found)"
+
+
+async def _generate_page_summary(
+    adapter, model: str, page_title: str, section_title: str,
+    content: str, language: str,
+) -> str:
+    """
+    为单个技术页面生成 2-3 句话摘要，供内容导航页使用。
+    在信号量外调用，不占并发槽。
+    """
+    content_preview = content[:2000]
+    messages = [
+        LLMMessage(role="user", content=PAGE_SUMMARY_PROMPT.format(
+            page_title=page_title,
+            section_title=section_title,
+            content_preview=content_preview,
+            language=language,
+        )),
+    ]
+    try:
+        resp = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.2)
+        return resp.content.strip()
+    except Exception as e:
+        logger.warning(f"[WikiGenerator] 页面摘要生成失败: {page_title} — {e}")
+        return f"{page_title}。"
+
+
+async def _generate_quick_start_overview(
+    adapter, model: str, repo_summary: dict, dep_context: str, language: str,
+) -> str:
+    """生成快速上手·项目概览页（含技术栈版本，基于依赖文件和 README）"""
+    messages = [
+        LLMMessage(role="user", content=QUICK_START_OVERVIEW_PROMPT.format(
+            repo_name=repo_summary["repo_name"],
+            languages=repo_summary["languages"],
+            dep_context=dep_context,
+            file_tree=repo_summary["file_tree"],
+            readme_content_section=repo_summary.get("readme_content_section", ""),
+            language=language,
+        )),
+    ]
+    try:
+        resp = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.5)
+        return resp.content
+    except Exception as e:
+        logger.warning(f"[WikiGenerator] 项目概览页生成失败: {e}")
+        is_chinese = language.lower() in ("chinese", "zh", "zh-cn", "中文")
+        title = "项目概览" if is_chinese else "Project Overview"
+        msg = "（页面生成失败，请稍后重试）" if is_chinese else "(Page generation failed.)"
+        return f"# {title}\n\n{msg}"
+
+
+async def _generate_quick_start_navigation(
+    adapter, model: str, repo_name: str,
+    page_summaries: List[dict], language: str,
+) -> str:
+    """
+    生成快速上手·内容导航页。
+    page_summaries: [{"section": str, "page": str, "summary": str}, ...]
+    """
+    is_chinese = language.lower() in ("chinese", "zh", "zh-cn", "中文")
+    title = "内容导航" if is_chinese else "Content Navigation"
+    if not page_summaries:
+        msg = "（暂无内容）" if is_chinese else "(No content yet.)"
+        return f"# {title}\n\n{msg}"
+    # 按章节分组
+    sections_map: Dict[str, List[dict]] = {}
+    for item in page_summaries:
+        sections_map.setdefault(item["section"], []).append(item)
+    summaries_lines = []
+    for sec_title, pages in sections_map.items():
+        summaries_lines.append(f"\n**{sec_title}**")
+        for p in pages:
+            summaries_lines.append(f"- 《{p['page']}》：{p['summary']}")
+    summaries_text = "\n".join(summaries_lines)
+    messages = [
+        LLMMessage(role="user", content=QUICK_START_NAVIGATION_PROMPT.format(
+            repo_name=repo_name,
+            summaries_text=summaries_text,
+            language=language,
+        )),
+    ]
+    try:
+        resp = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.4)
+        return resp.content
+    except Exception as e:
+        logger.warning(f"[WikiGenerator] 内容导航页生成失败: {e}")
+        msg = "（页面生成失败，请稍后重试）" if is_chinese else "(Page generation failed.)"
+        return f"# {title}\n\n{msg}"
+
+
+async def _regenerate_quick_start_pages(
+    db: AsyncSession,
+    wiki,
+    repo,
+    adapter,
+    model: str,
+    language: str,
+    collection,
+    repo_summary: Optional[dict] = None,
+    progress_callback: Optional[Callable] = None,
+    cancel_checker: Optional[Callable] = None,
+) -> None:
+    """
+    重新生成快速上手章节（项目概览 + 内容导航）并写入 DB。
+    从 DB 读取所有技术页面的 summary 字段构建导航上下文。
+    调用方：
+      - generate_wiki() 末尾（首次生成）
+      - update_wiki_incrementally() 末尾（每次增量同步）
+      - regenerate_specific_pages() 处理快速上手页时
+    """
+    if cancel_checker:
+        await cancel_checker()
+
+    # 1. 获取概要（可复用已计算结果）
+    if repo_summary is None:
+        repo_summary = await _get_repo_summary(db, wiki.repo_id, collection)
+    dep_context = await _get_dependency_context(repo)
+
+    # 2. 从 DB 读取技术页面摘要（跳过 order_index=0 的快速上手章节）
+    sections_result = await db.execute(
+        select(WikiSection).where(WikiSection.wiki_id == wiki.id)
+        .order_by(WikiSection.order_index)
+    )
+    sections = sections_result.scalars().all()
+
+    page_summaries: List[dict] = []
+    for section in sections:
+        if section.order_index == 0:
+            continue
+        pages_result = await db.execute(
+            select(WikiPage).where(WikiPage.section_id == section.id)
+            .order_by(WikiPage.order_index)
+        )
+        tech_pages = pages_result.scalars().all()
+        for page in tech_pages:
+            if page.summary:
+                page_summaries.append({
+                    "section": section.title,
+                    "page": page.title,
+                    "summary": page.summary,
+                })
+
+    # 3. 并行生成两个页面
+    if cancel_checker:
+        await cancel_checker()
+    overview_content, nav_content = await asyncio.gather(
+        _generate_quick_start_overview(adapter, model, repo_summary, dep_context, language),
+        _generate_quick_start_navigation(adapter, model, wiki.title, page_summaries, language),
+    )
+
+    # 4. 找到或创建快速上手章节（order_index=0）
+    is_chinese = language.lower() in ("chinese", "zh", "zh-cn", "中文")
+    qs_section_title = "快速上手" if is_chinese else "Quick Start"
+    overview_title = "项目概览" if is_chinese else "Project Overview"
+    nav_title = "内容导航" if is_chinese else "Content Navigation"
+
+    qs_section_result = await db.execute(
+        select(WikiSection).where(
+            WikiSection.wiki_id == wiki.id,
+            WikiSection.order_index == 0,
+        )
+    )
+    qs_section = qs_section_result.scalars().first()
+    if not qs_section:
+        qs_section = WikiSection(wiki_id=wiki.id, title=qs_section_title, order_index=0)
+        db.add(qs_section)
+        await db.flush()
+
+    # 5. 找到或创建两个页面（按 page_type 匹配）
+    for order_idx, pg_title, content, ptype in [
+        (0, overview_title, overview_content, "quick_start_overview"),
+        (1, nav_title, nav_content, "quick_start_navigation"),
+    ]:
+        existing_result = await db.execute(
+            select(WikiPage).where(
+                WikiPage.section_id == qs_section.id,
+                WikiPage.page_type == ptype,
+            )
+        )
+        existing_page = existing_result.scalars().first()
+        if existing_page:
+            existing_page.content_md = content
+        else:
+            db.add(WikiPage(
+                section_id=qs_section.id,
+                title=pg_title,
+                importance="high",
+                content_md=content,
+                relevant_files=[],
+                order_index=order_idx,
+                page_type=ptype,
+                summary=None,
+            ))
+
+    await db.commit()
+    logger.info(f"[WikiGenerator] 快速上手页面已更新: wiki_id={wiki.id}")
+
 
 async def generate_wiki(
     db: AsyncSession,
@@ -374,6 +708,13 @@ async def generate_wiki(
     outline = _parse_wiki_outline(outline_response.content)
     logger.info(f"[WikiGenerator] 大纲解析完成: {len(outline['sections'])} 个章节")
 
+    # 注入快速上手章节结构（order=0），其他章节 order 各加 1
+    quick_start_section = _get_quick_start_section(language)
+    for s in outline["sections"]:
+        s["order"] += 1
+    outline["sections"] = [quick_start_section] + outline["sections"]
+    logger.info("[WikiGenerator] 已注入快速上手章节结构")
+
     # 创建 Wiki 数据库记录
     # 先检查是否已存在该仓库的 Wiki，若存在则删除旧的
     existing_wiki_result = await db.execute(
@@ -394,100 +735,117 @@ async def generate_wiki(
     db.add(wiki)
     await db.flush()
 
-    # ===== 阶段 2: 并发生成页面内容 =====
-    total_pages = sum(len(s["pages"]) for s in outline["sections"])
-
-    if total_pages == 0:
-        logger.warning("[WikiGenerator] 大纲中无任何页面，跳过内容生成")
-        await db.flush()
-        return {"wiki_id": wiki.id, "total_pages": 0, "skipped_pages": 0}
-
-    logger.info(
-        f"[WikiGenerator] 开始生成页面内容: 共 {total_pages} 页"
-        f"（并发数={settings.WIKI_PAGE_CONCURRENCY}）"
-    )
-
-    # 2a: 并发执行所有页面的 LLM 调用（不涉及 DB，无 session 冲突）
-    semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
-
-    async def _generate_one(
-        s_data: dict, p_data: dict
-    ) -> Tuple[dict, dict, str]:
-        if cancel_checker:
-            await cancel_checker()
-        async with semaphore:
-            logger.info(f"[WikiGenerator] 生成页面: {p_data['title']}")
-            code_context = await _retrieve_code_context(
-                collection, p_data.get("relevant_files", []), p_data["title"]
-            )
-            content = await _generate_page_content(
-                adapter, model, p_data, s_data["title"],
-                repo_summary["repo_name"], code_context, language,
-            )
-        return s_data, p_data, content
-
-    # 保持原始顺序（section → page），asyncio.gather 保证结果顺序与任务顺序一致
-    task_meta: List[Tuple[dict, dict]] = [
+    # ===== 阶段 2: 并发生成技术页面（快速上手页在最后单独生成）=====
+    technical_task_meta: List[Tuple[dict, dict]] = [
         (s_data, p_data)
         for s_data in outline["sections"]
         for p_data in s_data["pages"]
+        if p_data.get("page_type") not in ("quick_start_overview", "quick_start_navigation")
     ]
-    tasks = [_generate_one(s, p) for s, p in task_meta]
+    total_technical = len(technical_task_meta)
 
-    if progress_callback:
-        await progress_callback(50, f"并发生成 {total_pages} 个页面（并发数={settings.WIKI_PAGE_CONCURRENCY}）...")
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    # 2b: 串行写入 DB（保持 AsyncSession 单协程使用，避免并发冲突）
-    section_map: Dict[str, WikiSection] = {}
-    page_count = 0
-    skipped_count = 0
-
-    for (s_data, p_data), result in zip(task_meta, results):
-        section_title = s_data["title"]
-
-        # 按需创建 WikiSection（每个 section 只创建一次，保持 order_index 顺序）
-        if section_title not in section_map:
-            section = WikiSection(
-                wiki_id=wiki.id,
-                title=section_title,
-                order_index=s_data["order"],
-            )
-            db.add(section)
-            await db.flush()
-            section_map[section_title] = section
-
-        if isinstance(result, Exception):
-            logger.error(
-                f"[WikiGenerator] 页面生成失败，跳过: {p_data['title']} — {result}"
-            )
-            skipped_count += 1
-            continue
-
-        _, _, content = result
-        page = WikiPage(
-            section_id=section_map[section_title].id,
-            title=p_data["title"],
-            importance=p_data.get("importance", "medium"),
-            content_md=content,
-            relevant_files=p_data.get("relevant_files"),
-            order_index=p_data["order"],
+    if total_technical == 0:
+        logger.warning("[WikiGenerator] 大纲中无技术页面，跳过内容生成")
+        await db.flush()
+        skipped_count = 0
+        page_count = 0
+    else:
+        logger.info(
+            f"[WikiGenerator] 开始生成技术页面内容: 共 {total_technical} 页"
+            f"（并发数={settings.WIKI_PAGE_CONCURRENCY}）"
         )
-        db.add(page)
-        page_count += 1
-        if progress_callback:
-            pct = 50 + page_count / total_pages * 45
-            await progress_callback(pct, f"写入页面 ({page_count}/{total_pages}): {p_data['title']}")
-        await db.commit()  # 每页提交一次，释放写锁，允许并发写入（如 DELETE）
 
+        # 2a: 并发执行所有技术页面的 LLM 调用
+        semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
+
+        async def _generate_one(
+            s_data: dict, p_data: dict
+        ) -> Tuple[dict, dict, str, str]:
+            if cancel_checker:
+                await cancel_checker()
+            async with semaphore:
+                logger.info(f"[WikiGenerator] 生成页面: {p_data['title']}")
+                code_context = await _retrieve_code_context(
+                    collection, p_data.get("relevant_files", []), p_data["title"]
+                )
+                content = await _generate_page_content(
+                    adapter, model, p_data, s_data["title"],
+                    repo_summary["repo_name"], code_context, language,
+                )
+            # 摘要生成在信号量外，不占并发槽
+            summary = await _generate_page_summary(
+                adapter, model, p_data["title"], s_data["title"], content, language,
+            )
+            return s_data, p_data, content, summary
+
+        tasks = [_generate_one(s, p) for s, p in technical_task_meta]
+
+        if progress_callback:
+            await progress_callback(50, f"并发生成 {total_technical} 个技术页面（并发数={settings.WIKI_PAGE_CONCURRENCY}）...")
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 2b: 串行写入 DB
+        section_map: Dict[str, WikiSection] = {}
+        page_count = 0
+        skipped_count = 0
+
+        for (s_data, p_data), result in zip(technical_task_meta, results):
+            section_title = s_data["title"]
+
+            if section_title not in section_map:
+                section = WikiSection(
+                    wiki_id=wiki.id,
+                    title=section_title,
+                    order_index=s_data["order"],
+                )
+                db.add(section)
+                await db.flush()
+                section_map[section_title] = section
+
+            if isinstance(result, Exception):
+                logger.error(
+                    f"[WikiGenerator] 页面生成失败，跳过: {p_data['title']} — {result}"
+                )
+                skipped_count += 1
+                continue
+
+            _, _, content, summary = result
+            page = WikiPage(
+                section_id=section_map[section_title].id,
+                title=p_data["title"],
+                importance=p_data.get("importance", "medium"),
+                content_md=content,
+                relevant_files=p_data.get("relevant_files"),
+                order_index=p_data["order"],
+                summary=summary,
+            )
+            db.add(page)
+            page_count += 1
+            if progress_callback:
+                pct = 50 + page_count / total_technical * 35
+                await progress_callback(pct, f"写入页面 ({page_count}/{total_technical}): {p_data['title']}")
+            await db.commit()
+
+    # ===== 阶段 3: 生成快速上手页（后生成，获取完整摘要上下文）=====
+    if progress_callback:
+        await progress_callback(88, "正在生成快速上手页面...")
+
+    repo = await db.get(Repository, repo_id)
+    await _regenerate_quick_start_pages(
+        db, wiki, repo, adapter, model, language, collection,
+        repo_summary=repo_summary,
+        cancel_checker=cancel_checker,
+    )
+
+    total_pages = total_technical + 2  # 含快速上手2页
     if skipped_count:
         logger.warning(
             f"[WikiGenerator] Wiki 生成完成（含跳过页）: wiki_id={wiki.id} "
-            f"成功={page_count} 跳过={skipped_count} 共={total_pages}"
+            f"技术页成功={page_count} 跳过={skipped_count} 快速上手=2"
         )
     else:
-        logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id} 共={total_pages} 页")
+        logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id} 共={total_pages} 页（含快速上手2页）")
     return {"wiki_id": wiki.id, "total_pages": total_pages, "skipped_pages": skipped_count}
 
 
@@ -527,6 +885,12 @@ async def regenerate_specific_pages(
 
     repo_name = wiki.title  # 用 wiki 标题作为 repo_name
 
+    # 加载 repo 对象（快速上手页需要）
+    repo_obj_result = await db.execute(
+        select(Repository).where(Repository.id == repo_id)
+    )
+    repo_obj = repo_obj_result.scalars().first()
+
     # 2. 加载指定页面（含所属 section）
     pages_result = await db.execute(
         select(WikiPage)
@@ -539,11 +903,32 @@ async def regenerate_specific_pages(
         logger.warning(f"[WikiGenerator] 未找到任何指定页面: page_ids={page_ids}")
         return {"wiki_id": wiki.id, "total_pages": 0, "skipped_pages": 0}
 
+    # 分离快速上手页和技术页
+    qs_pages = [p for p in pages if p.page_type in ("quick_start_overview", "quick_start_navigation")]
+    tech_pages = [p for p in pages if p.page_type not in ("quick_start_overview", "quick_start_navigation")]
+
     total = len(pages)
+    updated = 0
+    skipped = 0
+
     if progress_callback:
         await progress_callback(10, f"开始重新生成 {total} 个页面...")
 
-    # 3. 并发生成（复用现有逻辑）
+    # 快速上手页：统一调用专用生成函数
+    if qs_pages:
+        if progress_callback:
+            await progress_callback(15, "重新生成快速上手页面...")
+        try:
+            await _regenerate_quick_start_pages(
+                db, wiki, repo_obj, adapter, model, language, collection,
+                cancel_checker=cancel_checker,
+            )
+            updated += len(qs_pages)
+        except Exception as e:
+            logger.error(f"[WikiGenerator] 快速上手页面重新生成失败: {e}")
+            skipped += len(qs_pages)
+
+    # 3. 并发生成技术页（复用现有逻辑）
     semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
 
     async def _regen_one(page: WikiPage):
@@ -565,28 +950,45 @@ async def regenerate_specific_pages(
                 adapter, model, p_data, section_title,
                 repo_name, code_context, language,
             )
-            return page, content
+        summary = await _generate_page_summary(
+            adapter, model, page.title, section_title, content, language,
+        )
+        return page, content, summary
 
-    tasks = [_regen_one(p) for p in pages]
+    tasks = [_regen_one(p) for p in tech_pages]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # 4. 串行写入 DB
-    updated = 0
-    skipped = 0
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             logger.error(f"[WikiGenerator] 页面重新生成失败: {result}")
             skipped += 1
             continue
-        page, content = result
+        page, content, summary = result
         page.content_md = content
+        page.summary = summary
         await db.commit()
         updated += 1
         if progress_callback:
-            pct = 10 + updated / total * 85
-            await progress_callback(pct, f"已更新页面 ({updated}/{total}): {page.title}")
+            pct = 15 + (len(qs_pages) + updated) / total * 80
+            await progress_callback(pct, f"已更新页面 ({updated}/{len(tech_pages)}): {page.title}")
 
     logger.info(f"[WikiGenerator] 选择性重新生成完成: wiki_id={wiki.id} 更新={updated} 跳过={skipped}")
+
+    # 若有技术页被重新生成，其 summary 已更新，同步刷新快速上手导航页保持一致
+    if tech_pages and updated > 0:
+        if progress_callback:
+            await progress_callback(97, "同步更新快速上手导航页...")
+        try:
+            await _regenerate_quick_start_pages(
+                db, wiki, repo_obj, adapter, model, language, collection,
+                cancel_checker=cancel_checker,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[WikiGenerator] 快速上手导航页同步更新失败（不影响已更新的技术页）: {e}"
+            )
+
     return {"wiki_id": wiki.id, "total_pages": updated, "skipped_pages": skipped}
 
 
@@ -1244,6 +1646,9 @@ async def update_wiki_incrementally(
 
     for section in sections:
         for page in section_pages_map.get(section.id, []):
+            # 快速上手页始终在末尾单独重新生成，不参与脏页比例计算
+            if page.page_type in ("quick_start_overview", "quick_start_navigation"):
+                continue
             page_section_map[page.id] = section
             relevant_norm = {_norm(f) for f in (page.relevant_files or [])}
             if relevant_norm & changed_norm:
@@ -1293,7 +1698,7 @@ async def update_wiki_incrementally(
     # ── 并发更新脏页 ──────────────────────────────────────────
     semaphore = asyncio.Semaphore(settings.WIKI_PAGE_CONCURRENCY)
 
-    async def _update_one(page: WikiPage) -> Tuple[WikiPage, Optional[str]]:
+    async def _update_one(page: WikiPage) -> Tuple[WikiPage, Optional[str], Optional[str]]:
         if cancel_checker:
             await cancel_checker()
         async with semaphore:
@@ -1313,11 +1718,15 @@ async def update_wiki_incrementally(
                     },
                     section_title, repo_name, code_context, language,
                 )
+                new_summary = await _generate_page_summary(
+                    adapter, model, page.title,
+                    section_title, new_content, language,
+                )
                 logger.info(f"[WikiIncrUpdate] 页面已更新: {page.title}")
-                return page, new_content
+                return page, new_content, new_summary
             except Exception as e:
                 logger.error(f"[WikiIncrUpdate] 页面更新失败: {page.title} — {e}")
-                return page, None
+                return page, None, None
 
     tasks_list = [_update_one(p) for p in dirty_pages]
     if progress_callback:
@@ -1330,9 +1739,10 @@ async def update_wiki_incrementally(
     for result in results:
         if isinstance(result, Exception):
             continue
-        page, new_content = result
+        page, new_content, new_summary = result
         if new_content is not None:
             page.content_md = new_content
+            page.summary = new_summary
             updated_count += 1
     # 先提交页面内容，确保 LLM 生成的内容不因后续章节标题评估失败而丢失
     await db.commit()
@@ -1366,8 +1776,18 @@ async def update_wiki_incrementally(
 
     await db.commit()
 
+    # 方案3：每次增量同步末尾都重新生成快速上手页（保障用户体验）
+    if cancel_checker:
+        await cancel_checker()
     if progress_callback:
-        await progress_callback(95, f"增量更新完成：已更新 {updated_count} 个页面")
+        await progress_callback(96, "正在更新快速上手页面...")
+    await _regenerate_quick_start_pages(
+        db, wiki, repo_obj, adapter, model, language, collection,
+        cancel_checker=cancel_checker,
+    )
+
+    if progress_callback:
+        await progress_callback(99, f"增量更新完成：已更新 {updated_count} 个页面")
 
     return {
         "status": "updated",
