@@ -321,12 +321,14 @@ async def _run_task(
                     )
 
                 # ===== 阶段 3.5: 生成代码库索引 =====
-                try:
-                    from app.services.codebase_indexer import generate_codebase_index
-                    await generate_codebase_index(repo_id, db)
-                    logger.info(f"[Task] 代码库索引生成完成: repo_id={repo_id}")
-                except Exception as _idx_err:
-                    logger.warning(f"[Task] 代码库索引生成失败（不影响主流程）: {_idx_err}")
+                # 增量同步时跳过全量索引：变更文件已在 apply_incremental_sync 中增量更新
+                if not is_incremental:
+                    try:
+                        from app.services.codebase_indexer import generate_codebase_index
+                        await generate_codebase_index(repo_id, db)
+                        logger.info(f"[Task] 代码库索引生成完成: repo_id={repo_id}")
+                    except Exception as _idx_err:
+                        logger.warning(f"[Task] 代码库索引生成失败（不影响主流程）: {_idx_err}")
 
                 # ===== 阶段 4: Wiki 生成 / 增量更新 =====
                 _stage = "generating"
@@ -371,6 +373,9 @@ async def _run_task(
                         wiki_skipped = incr_result.get("skipped_pages", 0)
                         if incr_result["status"] == "full_regen_suggested":
                             wiki_regen_suggestion = incr_result.get("suggestion_reason")
+                    elif is_incremental:
+                        # 增量同步但无文件变更，跳过 Wiki 生成
+                        logger.info(f"[Task] 增量同步无文件变更，跳过 Wiki 生成: repo_id={repo_id}")
                     else:
                         # 全量处理：全量生成 Wiki
                         wiki_result = await generate_wiki(
