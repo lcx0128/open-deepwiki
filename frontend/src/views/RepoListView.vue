@@ -29,6 +29,15 @@ const pendingCommitsError = ref('')
 const showPendingCommits = ref(false)
 const pendingCommitsBranch = ref('')
 
+// 重新处理弹窗状态
+const reprocessTarget = ref<RepositoryItem | null>(null)
+const showReprocessModal = ref(false)
+const reprocessBranch = ref('')
+const reprocessPatToken = ref('')
+const reprocessLlmProvider = ref('')
+const reprocessLlmModel = ref('')
+const showReprocessAdvanced = ref(false)
+
 const filteredRepos = computed(() => {
   if (!filterStatus.value) return repoStore.repos
   return repoStore.repos.filter(r => r.status === filterStatus.value)
@@ -78,9 +87,27 @@ async function handleAbort() {
 }
 
 async function handleReprocess(repo: RepositoryItem) {
+  reprocessTarget.value = repo
+  reprocessBranch.value = repo.default_branch || 'main'
+  reprocessPatToken.value = ''
+  reprocessLlmProvider.value = ''
+  reprocessLlmModel.value = ''
+  showReprocessAdvanced.value = false
+  showReprocessModal.value = true
+}
+
+async function confirmReprocess() {
+  if (!reprocessTarget.value) return
+  const repo = reprocessTarget.value
+  showReprocessModal.value = false
   actionLoading.value = repo.id
   try {
-    const result = await reprocessRepository(repo.id)
+    const result = await reprocessRepository(repo.id, {
+      branch: reprocessBranch.value || undefined,
+      pat_token: reprocessPatToken.value || undefined,
+      llm_provider: reprocessLlmProvider.value || undefined,
+      llm_model: reprocessLlmModel.value || undefined,
+    })
     taskStore.setTask({
       id: result.task_id,
       repoId: repo.id,
@@ -433,8 +460,7 @@ onMounted(loadRepos)
     </div>
 
     <!-- 增量同步弹窗 -->
-    <div v-if="showSyncModal" class="modal-overlay" @click.self="showSyncModal = false">
-      <div class="modal card sync-modal">
+    <div v-if="showSyncModal" class="modal-overlay" @click.self="showSyncModal = false">      <div class="modal card sync-modal">
         <h3>增量更新仓库</h3>
         <p>
           将对仓库 <strong>{{ syncTarget?.name }}</strong> 执行增量同步：
@@ -530,6 +556,81 @@ onMounted(loadRepos)
         <div class="modal-actions">
           <button class="btn btn-secondary" @click="showSyncModal = false">取消</button>
           <button class="btn btn-primary" @click="confirmSync">开始增量更新</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 重新处理弹窗 -->
+    <div v-if="showReprocessModal" class="modal-overlay" @click.self="showReprocessModal = false">
+      <div class="modal card sync-modal">
+        <h3>重新处理仓库</h3>
+        <p>
+          将对仓库 <strong>{{ reprocessTarget?.name }}</strong> 执行完整重新处理：
+          重新克隆代码、解析、向量化并重新生成 Wiki。
+          <br><br>
+          <strong>处理期间将暂时无法查看 Wiki。</strong>
+        </p>
+
+        <!-- 分支配置 -->
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label class="form-label">目标分支</label>
+          <input
+            v-model="reprocessBranch"
+            class="form-input"
+            placeholder="如 main / develop / master"
+          />
+        </div>
+
+        <!-- 私有仓库 Token -->
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label class="form-label">PAT Token（私有仓库需重新填写）</label>
+          <input
+            v-model="reprocessPatToken"
+            type="password"
+            class="form-input"
+            placeholder="ghp_xxxxxxxxxx（公开仓库留空）"
+          />
+          <p class="form-hint">出于安全考虑，Token 不会被持久化存储，重新处理时需再次提供。</p>
+        </div>
+
+        <!-- LLM 高级选项 -->
+        <button class="advanced-toggle" @click="showReprocessAdvanced = !showReprocessAdvanced">
+          <svg
+            class="advanced-toggle__chevron"
+            :class="{ 'advanced-toggle__chevron--open': showReprocessAdvanced }"
+            viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"
+          >
+            <path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          LLM 配置（可选）
+        </button>
+
+        <div v-if="showReprocessAdvanced" class="sync-advanced">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">LLM 供应商</label>
+              <select v-model="reprocessLlmProvider" class="form-input form-select">
+                <option value="">默认（环境变量配置）</option>
+                <option value="openai">OpenAI</option>
+                <option value="dashscope">DashScope（阿里云）</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="custom">自定义</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">模型名称</label>
+              <input
+                v-model="reprocessLlmModel"
+                class="form-input"
+                placeholder="如 gpt-4o / qwen-plus"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-secondary" @click="showReprocessModal = false">取消</button>
+          <button class="btn btn-primary" @click="confirmReprocess">开始重新处理</button>
         </div>
       </div>
     </div>

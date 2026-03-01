@@ -230,6 +230,8 @@ async def reprocess_repository(
         task_id=task_id,
         repo_id=repo_id,
         repo_url=repo.url,
+        pat_token=request.pat_token,
+        branch=request.branch or repo.default_branch,
         llm_provider=request.llm_provider,
         llm_model=request.llm_model,
     )
