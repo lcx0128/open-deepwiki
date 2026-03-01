@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getRepositories, deleteRepository, reprocessRepository, syncRepository, abortRepository, getPendingCommits, type CommitInfo } from '@/api/repositories'
 import { regenerateWiki } from '@/api/wiki'
+import { getSystemConfig } from '@/api/system'
 import { useRepoStore } from '@/stores/repo'
 import { useTaskStore } from '@/stores/task'
 import { useEventSource } from '@/composables/useEventSource'
@@ -37,6 +38,10 @@ const reprocessPatToken = ref('')
 const reprocessLlmProvider = ref('')
 const reprocessLlmModel = ref('')
 const showReprocessAdvanced = ref(false)
+
+// 已保存的系统默认 LLM 配置（用于预填充对话框）
+const defaultLlmProvider = ref('')
+const defaultLlmModel = ref('')
 
 const filteredRepos = computed(() => {
   if (!filterStatus.value) return repoStore.repos
@@ -90,8 +95,8 @@ async function handleReprocess(repo: RepositoryItem) {
   reprocessTarget.value = repo
   reprocessBranch.value = repo.default_branch || 'main'
   reprocessPatToken.value = ''
-  reprocessLlmProvider.value = ''
-  reprocessLlmModel.value = ''
+  reprocessLlmProvider.value = defaultLlmProvider.value
+  reprocessLlmModel.value = defaultLlmModel.value
   showReprocessAdvanced.value = false
   showReprocessModal.value = true
 }
@@ -133,7 +138,10 @@ async function confirmReprocess() {
 async function handleRegenerate(repo: RepositoryItem) {
   actionLoading.value = repo.id
   try {
-    const result = await regenerateWiki(repo.id)
+    const requestData: { llm_provider?: string; llm_model?: string } = {}
+    if (defaultLlmProvider.value) requestData.llm_provider = defaultLlmProvider.value
+    if (defaultLlmModel.value)    requestData.llm_model    = defaultLlmModel.value
+    const result = await regenerateWiki(repo.id, requestData)
     taskStore.setTask({
       id: result.task_id,
       repoId: repo.id,
@@ -169,8 +177,8 @@ function stageLabel(stage: string | null | undefined): string {
 async function handleSync(repo: RepositoryItem) {
   syncTarget.value = repo
   showSyncModal.value = true
-  syncLlmProvider.value = ''
-  syncLlmModel.value = ''
+  syncLlmProvider.value = defaultLlmProvider.value
+  syncLlmModel.value = defaultLlmModel.value
   showSyncAdvanced.value = false
   // 重置提交列表状态
   pendingCommits.value = []
@@ -252,7 +260,16 @@ function formatDate(dateStr: string | null) {
   })
 }
 
-onMounted(loadRepos)
+onMounted(async () => {
+  await loadRepos()
+  try {
+    const cfg = await getSystemConfig()
+    if (cfg.is_customized) {
+      if (cfg.llm.default_provider) defaultLlmProvider.value = cfg.llm.default_provider
+      if (cfg.llm.default_model)    defaultLlmModel.value    = cfg.llm.default_model
+    }
+  } catch { /* 静默忽略 */ }
+})
 </script>
 
 <template>

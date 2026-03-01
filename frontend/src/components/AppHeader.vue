@@ -42,6 +42,7 @@ onMounted(() => {
         <nav class="header-nav">
           <RouterLink to="/" class="nav-link">首页</RouterLink>
           <RouterLink to="/repos" class="nav-link">仓库</RouterLink>
+          <RouterLink to="/system" class="nav-link">系统管理</RouterLink>
         </nav>
       </div>
       <div class="header-right">

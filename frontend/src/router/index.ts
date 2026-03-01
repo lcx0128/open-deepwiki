@@ -16,6 +16,12 @@ const router = createRouter({
       meta: { title: '仓库管理 - Open DeepWiki' },
     },
     {
+      path: '/system',
+      name: 'system',
+      component: () => import('@/views/SystemView.vue'),
+      meta: { title: '系统管理 - Open DeepWiki' },
+    },
+    {
       path: '/wiki/:repoId',
       name: 'wiki',
       component: () => import('@/views/WikiView.vue'),

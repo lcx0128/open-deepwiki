@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.config import settings
+from app.core.system_config import get_effective_config
 from app.schemas.chunk_node import ChunkNode
 from app.models.file_state import FileState
 
@@ -24,6 +25,8 @@ _chroma_client: Optional[chromadb.PersistentClient] = None
 
 # OpenAI 客户端（用于 Embedding）
 _openai_client: Optional[AsyncOpenAI] = None
+# 上次创建客户端时使用的配置签名（api_key, base_url），用于检测配置变更后自动重建客户端
+_last_embedding_config: Optional[tuple] = None
 
 
 def _get_chroma_client() -> chromadb.PersistentClient:
@@ -40,15 +43,20 @@ def _get_openai_client() -> AsyncOpenAI:
     优先使用 EMBEDDING_API_KEY / EMBEDDING_BASE_URL，
     未配置时回退到 OPENAI_API_KEY / OPENAI_BASE_URL。
     这样可以用平台 A 做 Wiki 生成（LLM），用平台 B 做向量提取（Embedding）。
+    配置优先级：system_config.json > .env 文件
+    当 Embedding 相关配置发生变更时自动重建客户端。
     """
-    global _openai_client
-    if _openai_client is None:
-        api_key = settings.EMBEDDING_API_KEY or settings.OPENAI_API_KEY or "dummy-key"
-        base_url = settings.EMBEDDING_BASE_URL or settings.OPENAI_BASE_URL
+    global _openai_client, _last_embedding_config
+    config = get_effective_config()
+    api_key = config["EMBEDDING_API_KEY"] or config["OPENAI_API_KEY"] or "dummy-key"
+    base_url = config["EMBEDDING_BASE_URL"] or config["OPENAI_BASE_URL"]
+    current_sig = (api_key, base_url)
+    if _openai_client is None or current_sig != _last_embedding_config:
         _openai_client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
         )
+        _last_embedding_config = current_sig
     return _openai_client
 
 
@@ -101,8 +109,9 @@ async def _call_embedding_api(texts: List[str]) -> List[List[float]]:
     """
     async with _get_semaphore():
         client = _get_openai_client()
+        config = get_effective_config()
         response = await client.embeddings.create(
-            model=settings.EMBEDDING_MODEL,
+            model=config["EMBEDDING_MODEL"],
             input=texts,
         )
         return [item.embedding for item in response.data]
