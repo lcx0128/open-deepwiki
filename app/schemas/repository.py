@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 class ReprocessRequest(BaseModel):
     llm_provider: Optional[str] = Field(None, description="LLM 供应商标识")
     llm_model: Optional[str] = Field(None, description="模型名称")
+    branch: Optional[str] = Field(None, description="目标分支，不填则使用已保存的默认分支")
+    pat_token: Optional[str] = Field(None, description="私有仓库 PAT Token，用后即毁")
 
 
 class IncrementalSyncRequest(BaseModel):
@@ -33,6 +35,7 @@ class RepositoryListItem(BaseModel):
     url: str
     name: str
     platform: str
+    default_branch: Optional[str] = "main"
     status: str
     failed_at_stage: Optional[str] = None
     last_synced_at: Optional[datetime] = None

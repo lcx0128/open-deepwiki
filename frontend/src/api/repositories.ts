@@ -20,6 +20,7 @@ export interface RepositoryItem {
   url: string
   name: string
   platform: string
+  default_branch: string
   status: 'pending' | 'cloning' | 'ready' | 'error' | 'syncing' | 'interrupted'
   last_synced_at: string | null
   created_at: string
@@ -70,7 +71,7 @@ export async function deleteRepository(repoId: string): Promise<void> {
 
 export async function reprocessRepository(
   repoId: string,
-  data?: { llm_provider?: string; llm_model?: string }
+  data?: { branch?: string; pat_token?: string; llm_provider?: string; llm_model?: string }
 ): Promise<SubmitRepoResponse> {
   const response = await apiClient.post<SubmitRepoResponse>(
     `/repositories/${repoId}/reprocess`,

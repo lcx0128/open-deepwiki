@@ -52,24 +52,27 @@ def on_worker_ready(**kwargs):
 
 
 async def _mark_interrupted_tasks():
-    """Worker 启动时将所有非终态任务标记为 INTERRUPTED，防止幽灵任务自动续传"""
+    """Worker 启动时将所有活跃执行中的任务标记为 INTERRUPTED，防止幽灵任务自动续传。
+    注意：只中断 CLONING/PARSING/EMBEDDING/GENERATING 等进行中状态，
+    保留 PENDING——PENDING 表示"已入队未开始"，是合法的待处理任务，不应被误杀。"""
     import logging as _logging
     _logger = _logging.getLogger("celery.worker")
     try:
         from app.database import async_session_factory
         from app.models.task import Task, TaskStatus
         from app.models.repository import Repository, RepoStatus
-        from sqlalchemy import select, not_
+        from sqlalchemy import select
 
-        _TERMINAL = [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED]
+        # 仅中断"正在执行"的状态，PENDING 任务已入队、尚未启动，不应被标记为中断
+        _ACTIVE = [TaskStatus.CLONING, TaskStatus.PARSING, TaskStatus.EMBEDDING, TaskStatus.GENERATING]
 
         async with async_session_factory() as db:
             result = await db.execute(
-                select(Task).where(not_(Task.status.in_(_TERMINAL)))
+                select(Task).where(Task.status.in_(_ACTIVE))
             )
             tasks = result.scalars().all()
             if not tasks:
-                _logger.info("[Worker] 无未完成任务，无需标记中断")
+                _logger.info("[Worker] 无执行中任务，无需标记中断")
                 return
 
             repo_ids = list({t.repo_id for t in tasks})
@@ -85,7 +88,7 @@ async def _mark_interrupted_tasks():
                     repo.status = RepoStatus.INTERRUPTED
             await db.commit()
             _logger.warning(
-                f"[Worker] 已将 {len(tasks)} 个未完成任务标记为 INTERRUPTED，"
+                f"[Worker] 已将 {len(tasks)} 个执行中任务标记为 INTERRUPTED，"
                 f"涉及仓库: {repo_ids}"
             )
     except Exception as e:

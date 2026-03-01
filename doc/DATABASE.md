@@ -1,6 +1,6 @@
 # 数据库设计文档
 
-> **版本**: 1.1.0 | **最后更新**: 2026-02-28
+> **版本**: 1.2.0 | **最后更新**: 2026-03-01
 
 本文档描述 Open-DeepWiki 系统的关系型数据库 Schema，采用 SQLAlchemy 2.0 ORM + Alembic 迁移管理。
 
@@ -210,6 +210,8 @@ alembic current
 | `content_md` | TEXT | NULLABLE | LLM 生成的 Markdown 内容，含代码块和 Mermaid 图 |
 | `relevant_files` | JSON | NULLABLE | 关联的源文件路径列表（JSON 数组） |
 | `order_index` | INTEGER | NOT NULL, DEFAULT 0 | 页面排序索引 |
+| `summary` | TEXT | NULLABLE | LLM 生成的页面摘要（2-3句话），供快速上手章节的内容导航页生成使用 |
+| `page_type` | VARCHAR(32) | NULLABLE | 页面类型标识：NULL=普通技术页，quick_start_overview=项目概览页，quick_start_navigation=内容导航页 |
 
 **索引**:
 - 主键索引: `id`
@@ -281,3 +283,4 @@ repositories (1) ──── (N) tasks
 | 003 | `20260221_003_add_wiki_tables.py` | 新增 Wiki 文档表（wikis, wiki_sections, wiki_pages） |
 | 004 | `20260227_004_add_interrupted_status.py` | repositories 和 tasks 的 status ENUM 新增 interrupted 值 |
 | 005 | `20260228_005_add_repo_index.py` | 新增 repo_indexes 表（代码库结构索引） |
+| 006 | `20260301_006_add_wiki_page_summary.py` | wiki_pages 表新增 summary（页面摘要）和 page_type（页面类型）字段 |
