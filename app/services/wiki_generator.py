@@ -314,6 +314,7 @@ Rules:
 - subsections: 3-6 items covering the page topic
 - diagrams: 0-2 diagrams (only if genuinely useful; omit for config/testing pages)
 - key_references: 3-8 most important code locations
+- diagram ids MUST be exactly "DIAGRAM_1", "DIAGRAM_2", etc. (sequential integers, no custom names)
 """
 
 PAGE_DIAGRAM_PROMPT = """Generate ONLY the diagrams listed below. No prose, no explanations.
@@ -1227,6 +1228,20 @@ def _merge_diagrams_into_prose(prose: str, diagrams_raw: str) -> str:
     return re.sub(r'\[DIAGRAM_\d+\]', '', result)
 
 
+def _fix_bold_formatting(content: str) -> str:
+    """修复 LLM 输出的 '** text**' 错误加粗格式（** 后紧跟空格导致 Markdown 不渲染）。
+    仅处理代码围栏以外的正文段落，避免误改代码块中的 ** 幂运算符。
+    """
+    # 按代码围栏分割：偶数索引为正文，奇数索引为代码块
+    parts = re.split(r'(```[\s\S]*?```)', content)
+    fixed = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            part = re.sub(r'\*\*\s+(\S)', r'**\1', part)
+        fixed.append(part)
+    return ''.join(fixed)
+
+
 async def _generate_page_content(
     adapter, model: str, page_data: dict,
     section_title: str, repo_name: str, code_context: str,
@@ -1241,6 +1256,9 @@ async def _generate_page_content(
     """
     # Agent 1：规划（串行，为后续两个 Agent 提供上下文）
     plan = await _plan_page(adapter, model, page_data, section_title, repo_name, code_context)
+    # 归一化 diagram ID：无论 LLM 输出何种自定义名称，统一重映射为 DIAGRAM_N
+    for _i, _d in enumerate(plan.get("diagrams", []), 1):
+        _d["id"] = f"DIAGRAM_{_i}"
     logger.info(
         f"[WikiGenerator] 页面规划完成: {page_data['title']} "
         f"| 子章节={len(plan.get('subsections', []))} "
@@ -1295,6 +1313,7 @@ async def _generate_page_content(
                 raise
 
     # 后处理流水线
+    content = _fix_bold_formatting(content)
     content = process_diagram_specs(content)
     content = await retry_failed_diagram_specs(content, adapter, model)
     content = await validate_and_fix_mermaid(adapter, model, content)
