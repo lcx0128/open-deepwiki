@@ -36,7 +36,7 @@ def setup_worker_logging(**kwargs):
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
     from app.core.logging_setup import setup_file_logging
-    setup_file_logging(settings)
+    setup_file_logging(settings, process_name="worker")
     logger = logging.getLogger("celery.worker")
     logger.info(f"[Worker] 日志级别: {settings.LOG_LEVEL.upper()}, Broker: {settings.REDIS_URL}")
 

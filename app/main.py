@@ -12,7 +12,7 @@ logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-setup_file_logging(settings)
+setup_file_logging(settings, process_name="api")
 logger = logging.getLogger(__name__)
 
 
