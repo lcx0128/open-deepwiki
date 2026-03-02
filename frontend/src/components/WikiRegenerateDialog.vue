@@ -27,7 +27,7 @@ function hasEmptyPages(): boolean {
 const mode = ref<'full' | 'partial'>(hasEmptyPages() ? 'partial' : 'full')
 const selectedPageIds = ref<Set<string>>(new Set())
 
-function isPageEmpty(contentMd: string): boolean {
+function isPageEmpty(contentMd: string | null | undefined): boolean {
   return !contentMd || contentMd.trim() === ''
 }
 

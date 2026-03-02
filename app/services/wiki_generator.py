@@ -902,9 +902,21 @@ async def generate_wiki(
 
             if isinstance(result, Exception):
                 logger.error(
-                    f"[WikiGenerator] 页面生成失败，跳过: {p_data['title']} — {result}"
+                    f"[WikiGenerator] 页面生成失败，写入空页面以供后续重新生成: {p_data['title']} — {result}"
                 )
                 skipped_count += 1
+                # 仍写入空 WikiPage，使前端可以选中并重新生成
+                page = WikiPage(
+                    section_id=section_map[section_title].id,
+                    title=p_data["title"],
+                    importance=p_data.get("importance", "medium"),
+                    content_md=None,
+                    relevant_files=p_data.get("relevant_files"),
+                    order_index=p_data["order"],
+                    summary=None,
+                )
+                db.add(page)
+                await db.commit()
                 continue
 
             _, _, content, summary = result
@@ -1303,15 +1315,26 @@ async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
     language_stats = "unknown"
 
     try:
-        # 获取所有 chunk 的元数据（仅 metadatas，无向量/文档，内存开销极小）
-        results = collection.get(limit=None, include=["metadatas"])
-        if results and results.get("metadatas"):
+        # 分批获取所有 chunk 的元数据，避免 SQLite "too many SQL variables" 错误
+        # （limit=None 会生成超长 IN 子句，chunk 数 > 999 时必然崩溃）
+        _BATCH = 500
+        all_metadatas: list = []
+        _offset = 0
+        while True:
+            _batch = collection.get(limit=_BATCH, offset=_offset, include=["metadatas"])
+            _metas = (_batch or {}).get("metadatas") or []
+            all_metadatas.extend(_metas)
+            if len(_metas) < _BATCH:
+                break
+            _offset += _BATCH
+
+        if all_metadatas:
             file_counts: Dict[str, int] = {}
 
             # 构建文件摘要（函数/类清单）
             file_summary_map: Dict[str, dict] = {}  # file_path -> {language, functions: [], classes: []}
 
-            for meta in results["metadatas"]:
+            for meta in all_metadatas:
                 if meta:
                     lang = meta.get("language", "")
                     if lang:
