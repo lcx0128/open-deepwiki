@@ -31,11 +31,12 @@ class GeminiAdapter(BaseLLMAdapter):
         self.client = AsyncOpenAI(
             api_key=api_key or "dummy-key",
             base_url=self.base_url,
+            max_retries=0,  # 禁用 SDK 内置重试，由 tenacity 统一管理，避免双重重试叠加
         )
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
+        wait=wait_exponential(multiplier=2, min=10, max=60),
         retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError, asyncio.TimeoutError, APIConnectionError, InternalServerError)),
         before_sleep=lambda state: logger.warning(
             f"[GeminiAdapter] 重试第 {state.attempt_number} 次"

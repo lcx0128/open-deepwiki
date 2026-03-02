@@ -5,12 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db, engine
 from app.core.redis_client import init_redis, close_redis
 from app.config import settings
+from app.core.logging_setup import setup_file_logging
 
 # 配置日志
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+setup_file_logging(settings)
 logger = logging.getLogger(__name__)
 
 

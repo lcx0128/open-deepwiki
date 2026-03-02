@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     REPOS_BASE_DIR: str = "./repos"
 
+    # 文件日志
+    ENABLE_FILE_LOGGING: bool = False        # 是否将日志写入本地文件
+    LOG_DIR: str = "logs"                    # 日志目录
+    LOG_MAX_SIZE_MB: int = 50               # 单个日志文件最大体积（MB），超出后轮转
+    LOG_BACKUP_COUNT: int = 5               # 保留的历史日志份数（.1/.2/...）
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
