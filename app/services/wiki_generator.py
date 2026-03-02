@@ -955,6 +955,7 @@ async def generate_wiki(
         )
     else:
         logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id} 共={total_pages} 页（含快速上手2页）")
+    await adapter.aclose()
     return {"wiki_id": wiki.id, "total_pages": total_pages, "skipped_pages": skipped_count}
 
 
@@ -1010,6 +1011,7 @@ async def regenerate_specific_pages(
 
     if not pages:
         logger.warning(f"[WikiGenerator] 未找到任何指定页面: page_ids={page_ids}")
+        await adapter.aclose()
         return {"wiki_id": wiki.id, "total_pages": 0, "skipped_pages": 0}
 
     # 分离快速上手页和技术页
@@ -1098,6 +1100,7 @@ async def regenerate_specific_pages(
                 f"[WikiGenerator] 快速上手导航页同步更新失败（不影响已更新的技术页）: {e}"
             )
 
+    await adapter.aclose()
     return {"wiki_id": wiki.id, "total_pages": updated, "skipped_pages": skipped}
 
 
@@ -1947,6 +1950,7 @@ async def update_wiki_incrementally(
     if progress_callback:
         await progress_callback(99, f"增量更新完成：已更新 {updated_count} 个页面")
 
+    await adapter.aclose()
     return {
         "status": "updated",
         "wiki_id": wiki.id,

@@ -21,6 +21,9 @@ class OpenAIAdapter(BaseLLMAdapter):
             base_url=base_url,
         )
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=30),

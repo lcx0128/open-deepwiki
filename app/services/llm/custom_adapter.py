@@ -26,6 +26,9 @@ class CustomAdapter(BaseLLMAdapter):
         super().__init__(api_key, base_url, **kwargs)
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     async def generate(
         self,
         messages: List[LLMMessage],

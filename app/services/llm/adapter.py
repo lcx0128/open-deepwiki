@@ -75,3 +75,12 @@ class BaseLLMAdapter(ABC):
         async with self._get_semaphore():
             async for chunk in self.stream(messages, model, temperature, max_tokens):
                 yield chunk
+
+    async def aclose(self) -> None:
+        """释放底层 HTTP 客户端资源，子类按需覆写"""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        await self.aclose()

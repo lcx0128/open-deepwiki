@@ -34,6 +34,9 @@ class GeminiAdapter(BaseLLMAdapter):
             max_retries=0,  # 禁用 SDK 内置重试，由 tenacity 统一管理，避免双重重试叠加
         )
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=10, max=60),
