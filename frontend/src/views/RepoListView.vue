@@ -361,6 +361,16 @@ onMounted(async () => {
                 {{ repo.platform === 'github' ? '⬡' : repo.platform === 'gitlab' ? '🦊' : '☁' }}
               </span>
               <span class="platform-name">{{ repo.platform }}</span>
+              <span class="branch-badge">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <circle cx="5" cy="3.5" r="1.5"/>
+                  <circle cx="5" cy="12.5" r="1.5"/>
+                  <circle cx="11" cy="6.5" r="1.5"/>
+                  <path d="M5 5v5" stroke-linecap="round"/>
+                  <path d="M5 5.5C5 7.5 11 7.5 11 8" stroke-linecap="round"/>
+                </svg>
+                {{ repo.default_branch || 'main' }}
+              </span>
             </div>
             <h3 class="repo-card__name">{{ repo.name }}</h3>
           </div>
@@ -812,6 +822,27 @@ onMounted(async () => {
   font-size: var(--font-size-xs);
   color: var(--text-muted);
   text-transform: capitalize;
+}
+
+.branch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--font-size-xs);
+  color: var(--text-tertiary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  padding: 1px 7px 1px 5px;
+  font-family: var(--font-mono);
+  line-height: 1.6;
+}
+
+.branch-badge svg {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  color: var(--text-muted);
 }
 
 .repo-card__name {
