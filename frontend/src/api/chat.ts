@@ -1,6 +1,13 @@
 // 对话 API - 对应模块五（RAG + 对话）
 // 后端端点: GET /api/chat/stream?repo_id=&session_id=&query=
 
+const TOKEN_KEY = 'auth_token'
+
+function getAuthHeader(): Record<string, string> {
+  const token = localStorage.getItem(TOKEN_KEY)
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 export interface ChunkRef {
   file_path: string
   start_line: number
@@ -18,7 +25,9 @@ export interface SessionMessage {
 
 export async function getChatSession(sessionId: string): Promise<{ session_id: string; messages: SessionMessage[] }> {
   const baseUrl = import.meta.env.VITE_API_BASE_URL || '/api'
-  const response = await fetch(`${baseUrl}/chat/sessions/${sessionId}`)
+  const response = await fetch(`${baseUrl}/chat/sessions/${sessionId}`, {
+    headers: getAuthHeader(),
+  })
   if (!response.ok) throw new Error(`Session not found: ${response.status}`)
   return response.json()
 }
@@ -41,6 +50,8 @@ export function createChatStream(options: ChatStreamOptions): EventSource {
     session_id: options.sessionId || '',
     query: options.query,
   })
+  const token = localStorage.getItem(TOKEN_KEY)
+  if (token) params.set('token', token)
   const url = `${baseUrl}/chat/stream?${params.toString()}`
 
   const eventSource = new EventSource(url)
@@ -99,7 +110,7 @@ export function createDeepResearchStream(options: DeepResearchStreamOptions): Ab
 
   fetch(`${baseUrl}/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
     body: JSON.stringify({
       repo_id: options.repoId,
       session_id: options.sessionId || null,

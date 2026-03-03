@@ -1,8 +1,15 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
+    {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/LoginView.vue'),
+      meta: { title: '登录 - Open DeepWiki', public: true },
+    },
     {
       path: '/',
       name: 'home',
@@ -43,6 +50,34 @@ router.afterEach((to) => {
   if (to.meta?.title) {
     document.title = to.meta.title as string
   }
+})
+
+// 鉴权守卫：仅在首次导航时初始化 auth 状态，之后每次导航检查登录
+let authInitialized = false
+
+router.beforeEach(async (to) => {
+  const authStore = useAuthStore()
+
+  if (!authInitialized) {
+    await authStore.checkStatus()
+    authInitialized = true
+  }
+
+  // 鉴权未启用，全部放行
+  if (!authStore.authEnabled) return true
+
+  // 登录页等公开路由，直接放行
+  if (to.meta?.public) return true
+
+  // 未登录 → 跳转登录页，并记录目标路径以便登录后重定向
+  if (!authStore.isAuthenticated) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
+
+  // 已登录访问登录页 → 跳回首页
+  if (to.name === 'login') return { name: 'home' }
+
+  return true
 })
 
 export default router

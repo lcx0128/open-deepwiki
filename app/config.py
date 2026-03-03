@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # MCP
     MCP_AUTH_TOKEN: Optional[str] = None
 
+    # 访问鉴权（部署到公网时开启，防止未授权提交）
+    AUTH_ENABLED: bool = False
+    AUTH_PASSWORD: Optional[str] = None
+    AUTH_SESSION_EXPIRE_HOURS: int = 168  # 默认 7 天
+
     # Wiki 生成语言（生成的所有 Wiki 内容强制使用该语言）
     # 示例：Chinese / English / Japanese / French / German
     WIKI_LANGUAGE: str = "Chinese"

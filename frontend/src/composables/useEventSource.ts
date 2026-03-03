@@ -18,7 +18,9 @@ export function useEventSource() {
     _closeOne(taskId)
     conns.set(taskId, { es: null, timer: null, attempts: 0 })
     const base = import.meta.env.VITE_API_BASE_URL || '/api'
-    _doConnect(`${base}/tasks/${taskId}/stream`, taskId)
+    const token = localStorage.getItem('auth_token')
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+    _doConnect(`${base}/tasks/${taskId}/stream${tokenParam}`, taskId)
   }
 
   function _doConnect(url: string, taskId: string) {
