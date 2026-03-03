@@ -488,6 +488,7 @@ watch(() => wikiStore.activePageId, async () => {
     <WikiRegenerateDialog
       v-if="showRegenerateDialog"
       :wiki="wikiStore.wiki"
+      :current-page-id="wikiStore.activePageId"
       v-model:visible="showRegenerateDialog"
       @confirm="handleRegenerateConfirm"
       @cancel="showRegenerateDialog = false"

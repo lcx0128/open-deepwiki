@@ -4,7 +4,7 @@ export interface WikiPage {
   id: string
   title: string
   importance: 'high' | 'medium' | 'low'
-  content_md: string
+  content_md: string | null
   relevant_files: string[]
   order_index: number
 }

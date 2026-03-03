@@ -9,9 +9,9 @@ import logging
 from typing import AsyncIterator, List, Optional
 
 from openai import AsyncOpenAI, RateLimitError, APIConnectionError, InternalServerError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, retry_if_exception_type
 
-from app.services.llm.adapter import BaseLLMAdapter
+from app.services.llm.adapter import BaseLLMAdapter, _retry_after_wait, _make_before_sleep_log
 from app.schemas.llm import LLMMessage, LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -31,15 +31,17 @@ class GeminiAdapter(BaseLLMAdapter):
         self.client = AsyncOpenAI(
             api_key=api_key or "dummy-key",
             base_url=self.base_url,
+            max_retries=0,  # 禁用 SDK 内置重试，由 tenacity 统一管理，避免双重重试叠加
         )
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
+        stop=stop_after_attempt(6),
+        wait=_retry_after_wait,
         retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError, asyncio.TimeoutError, APIConnectionError, InternalServerError)),
-        before_sleep=lambda state: logger.warning(
-            f"[GeminiAdapter] 重试第 {state.attempt_number} 次"
-        ),
+        before_sleep=_make_before_sleep_log("GeminiAdapter"),
     )
     async def generate(
         self,

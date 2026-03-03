@@ -1,16 +1,18 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db, engine
 from app.core.redis_client import init_redis, close_redis
 from app.config import settings
+from app.core.logging_setup import setup_file_logging
 
 # 配置日志
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+setup_file_logging(settings, process_name="api")
 logger = logging.getLogger(__name__)
 
 
@@ -54,17 +56,23 @@ app.add_middleware(
 from app.models.repo_index import RepoIndex  # noqa: F401
 
 # 注册路由
+from app.api.auth import router as auth_router
 from app.api.repositories import router as repositories_router
 from app.api.tasks import router as tasks_router
 from app.api.wiki import router as wiki_router
 from app.api.chat import router as chat_router
 from app.api.system import router as system_router
+from app.core.auth import require_auth
 
-app.include_router(repositories_router)
-app.include_router(tasks_router)
-app.include_router(wiki_router)
-app.include_router(chat_router)
-app.include_router(system_router)
+# auth 路由公开访问（登录/登出/状态查询不需要鉴权）
+app.include_router(auth_router)
+
+# 其余路由受 require_auth 保护（AUTH_ENABLED=False 时依赖项直接放行）
+app.include_router(repositories_router, dependencies=[Depends(require_auth)])
+app.include_router(tasks_router, dependencies=[Depends(require_auth)])
+app.include_router(wiki_router, dependencies=[Depends(require_auth)])
+app.include_router(chat_router, dependencies=[Depends(require_auth)])
+app.include_router(system_router, dependencies=[Depends(require_auth)])
 
 
 @app.get("/health", tags=["health"])

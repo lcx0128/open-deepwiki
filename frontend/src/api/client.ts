@@ -1,9 +1,20 @@
 import axios from 'axios'
 
+const TOKEN_KEY = 'auth_token'
+
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
   timeout: 30000,
   headers: { 'Content-Type': 'application/json' },
+})
+
+// 请求拦截器：自动附加会话 token
+apiClient.interceptors.request.use((config) => {
+  const token = localStorage.getItem(TOKEN_KEY)
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`
+  }
+  return config
 })
 
 apiClient.interceptors.response.use(
@@ -14,6 +25,13 @@ apiClient.interceptors.response.use(
       switch (status) {
         case 400:
           console.error('请求参数错误:', data?.detail || data)
+          break
+        case 401:
+          // token 失效或未登录，清除本地凭证并跳转登录页
+          localStorage.removeItem(TOKEN_KEY)
+          if (window.location.pathname !== '/login') {
+            window.location.href = '/login'
+          }
           break
         case 404:
           console.error('资源不存在:', data?.detail)

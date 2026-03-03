@@ -10,9 +10,9 @@ import logging
 from typing import AsyncIterator, List, Optional
 
 from openai import AsyncOpenAI, RateLimitError, APIConnectionError, InternalServerError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, retry_if_exception_type
 
-from app.services.llm.adapter import BaseLLMAdapter
+from app.services.llm.adapter import BaseLLMAdapter, _retry_after_wait, _make_before_sleep_log
 from app.schemas.llm import LLMMessage, LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -35,13 +35,14 @@ class DashScopeAdapter(BaseLLMAdapter):
             base_url=self.base_url,
         )
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
+        stop=stop_after_attempt(6),
+        wait=_retry_after_wait,
         retry=retry_if_exception_type((RateLimitError, TimeoutError, ConnectionError, asyncio.TimeoutError, APIConnectionError, InternalServerError)),
-        before_sleep=lambda state: logger.warning(
-            f"[DashScopeAdapter] 重试第 {state.attempt_number} 次"
-        ),
+        before_sleep=_make_before_sleep_log("DashScopeAdapter"),
     )
     async def generate(
         self,

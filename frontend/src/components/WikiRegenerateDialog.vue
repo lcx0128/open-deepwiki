@@ -6,6 +6,7 @@ import { getSystemConfig } from '@/api/system'
 const props = defineProps<{
   wiki: WikiResponse | null
   visible: boolean
+  currentPageId?: string
 }>()
 
 const emit = defineEmits<{
@@ -27,7 +28,7 @@ function hasEmptyPages(): boolean {
 const mode = ref<'full' | 'partial'>(hasEmptyPages() ? 'partial' : 'full')
 const selectedPageIds = ref<Set<string>>(new Set())
 
-function isPageEmpty(contentMd: string): boolean {
+function isPageEmpty(contentMd: string | null | undefined): boolean {
   return !contentMd || contentMd.trim() === ''
 }
 
@@ -241,6 +242,10 @@ function setSectionIndeterminate(el: HTMLInputElement | null, sectionId: string)
                     class="regen-checkbox"
                   />
                   <span class="regen-row__label">{{ page.title }}</span>
+                  <span
+                    v-if="page.id === currentPageId"
+                    class="regen-badge regen-badge--current"
+                  >当前页</span>
                   <span
                     v-if="isPageEmpty(page.content_md)"
                     class="regen-badge regen-badge--empty"
@@ -503,6 +508,18 @@ function setSectionIndeterminate(el: HTMLInputElement | null, sectionId: string)
   padding: 2px 6px;
   border-radius: 4px;
   line-height: 1.4;
+}
+
+.regen-badge--current {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+}
+
+[data-theme="dark"] .regen-badge--current {
+  color: #60a5fa;
+  background: rgba(96, 165, 250, 0.1);
+  border-color: rgba(96, 165, 250, 0.2);
 }
 
 .regen-badge--empty {

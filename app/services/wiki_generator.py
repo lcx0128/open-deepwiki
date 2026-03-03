@@ -27,8 +27,38 @@ from app.services.token_degradation import is_token_overflow, generate_with_degr
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+_llm_failure_logger = logging.getLogger("llm.failures")
 
-# ============================================================
+_LLM_FAILURE_SEP = "=" * 80
+
+
+def _log_llm_failure(
+    context: str,
+    messages: list,
+    response: str = "",
+    error: str = "",
+) -> None:
+    """将 LLM 调用失败的完整 prompt 和响应写入 llm_failures.log（仅在 ENABLE_FILE_LOGGING=true 时生效）。"""
+    if not settings.ENABLE_FILE_LOGGING:
+        return
+    prompt_parts = []
+    for msg in messages:
+        role = msg.role if hasattr(msg, "role") else msg.get("role", "?")
+        content = msg.content if hasattr(msg, "content") else msg.get("content", "")
+        # 截断超长 prompt，避免单条日志过大（最多 8000 字符/消息）
+        if len(content) > 8000:
+            content = content[:8000] + "\n... [truncated]"
+        prompt_parts.append(f"[{role}]:\n{content}")
+    prompt_text = "\n\n".join(prompt_parts)
+    _llm_failure_logger.error(
+        "\n%s\n上下文: %s\n错误: %s\n--- PROMPT ---\n%s\n--- RESPONSE ---\n%s\n%s",
+        _LLM_FAILURE_SEP,
+        context,
+        error or "(无)",
+        prompt_text or "(无)",
+        response or "(empty)",
+        _LLM_FAILURE_SEP,
+    )
 # 图表生成 System Prompt（JSON spec 格式）
 # ============================================================
 MERMAID_CONSTRAINT_PROMPT = """
@@ -284,6 +314,7 @@ Rules:
 - subsections: 3-6 items covering the page topic
 - diagrams: 0-2 diagrams (only if genuinely useful; omit for config/testing pages)
 - key_references: 3-8 most important code locations
+- diagram ids MUST be exactly "DIAGRAM_1", "DIAGRAM_2", etc. (sequential integers, no custom names)
 """
 
 PAGE_DIAGRAM_PROMPT = """Generate ONLY the diagrams listed below. No prose, no explanations.
@@ -751,11 +782,28 @@ async def generate_wiki(
         LLMMessage(role="user", content=WIKI_OUTLINE_PROMPT.format(**repo_summary, language=language)),
     ]
 
-    outline_response = await adapter.generate_with_rate_limit(
-        messages=outline_messages, model=model, temperature=0.3,
-    )
+    outline = None
+    _last_outline_resp = ""
+    for _attempt in range(3):
+        outline_response = await adapter.generate_with_rate_limit(
+            messages=outline_messages, model=model, temperature=0.3,
+        )
+        _last_outline_resp = outline_response.content
+        outline = _parse_wiki_outline(outline_response.content)
+        if outline is not None:
+            break
+        # 每次格式错误立即记录，不等到全部失败，方便追踪哪次返回有问题
+        _log_llm_failure(
+            context=f"Wiki大纲生成-第{_attempt + 1}次（repo_id={repo_id}）",
+            messages=outline_messages,
+            response=_last_outline_resp,
+            error="XML解析失败（LLM返回格式不符合 <wiki_structure> 要求）",
+        )
+        logger.warning(f"[WikiGenerator] 大纲解析失败，第 {_attempt + 1}/3 次重试...")
+    if outline is None:
+        logger.warning("[WikiGenerator] 大纲解析连续失败，降级为默认大纲")
+        outline = _default_outline()
 
-    outline = _parse_wiki_outline(outline_response.content)
     logger.info(f"[WikiGenerator] 大纲解析完成: {len(outline['sections'])} 个章节")
 
     # 注入快速上手章节结构（order=0），其他章节 order 各加 1
@@ -855,9 +903,21 @@ async def generate_wiki(
 
             if isinstance(result, Exception):
                 logger.error(
-                    f"[WikiGenerator] 页面生成失败，跳过: {p_data['title']} — {result}"
+                    f"[WikiGenerator] 页面生成失败，写入空页面以供后续重新生成: {p_data['title']} — {result}"
                 )
                 skipped_count += 1
+                # 仍写入空 WikiPage，使前端可以选中并重新生成
+                page = WikiPage(
+                    section_id=section_map[section_title].id,
+                    title=p_data["title"],
+                    importance=p_data.get("importance", "medium"),
+                    content_md=None,
+                    relevant_files=p_data.get("relevant_files"),
+                    order_index=p_data["order"],
+                    summary=None,
+                )
+                db.add(page)
+                await db.commit()
                 continue
 
             _, _, content, summary = result
@@ -896,6 +956,7 @@ async def generate_wiki(
         )
     else:
         logger.info(f"[WikiGenerator] Wiki 生成完成: wiki_id={wiki.id} 共={total_pages} 页（含快速上手2页）")
+    await adapter.aclose()
     return {"wiki_id": wiki.id, "total_pages": total_pages, "skipped_pages": skipped_count}
 
 
@@ -951,6 +1012,7 @@ async def regenerate_specific_pages(
 
     if not pages:
         logger.warning(f"[WikiGenerator] 未找到任何指定页面: page_ids={page_ids}")
+        await adapter.aclose()
         return {"wiki_id": wiki.id, "total_pages": 0, "skipped_pages": 0}
 
     # 分离快速上手页和技术页
@@ -1039,6 +1101,7 @@ async def regenerate_specific_pages(
                 f"[WikiGenerator] 快速上手导航页同步更新失败（不影响已更新的技术页）: {e}"
             )
 
+    await adapter.aclose()
     return {"wiki_id": wiki.id, "total_pages": updated, "skipped_pages": skipped}
 
 
@@ -1063,6 +1126,12 @@ async def _plan_page(
         return _json.loads(raw)
     except Exception as e:
         logger.warning(f"[WikiGenerator] 页面规划失败，使用默认规划: {e}")
+        _log_llm_failure(
+            context=f"页面规划（页面: {page_data.get('title', '?')}）",
+            messages=messages,
+            response=raw if 'raw' in dir() else "",
+            error=f"JSON解析失败: {e}",
+        )
         return {
             "subsections": ["Overview", "Implementation", "Configuration"],
             "diagrams": [{"id": "DIAGRAM_1", "type": "flowchart", "description": "Component relationships"}],
@@ -1095,6 +1164,11 @@ async def _generate_diagrams_only(
         return resp.content
     except Exception as e:
         logger.warning(f"[WikiGenerator] 图表生成失败: {e}")
+        _log_llm_failure(
+            context=f"图表生成（页面: {page_data['title']}）",
+            messages=messages,
+            error=str(e),
+        )
         return ""
 
 
@@ -1126,6 +1200,11 @@ async def _generate_prose_only(
         return resp.content
     except Exception as e:
         logger.warning(f"[WikiGenerator] 正文生成失败: {e}")
+        _log_llm_failure(
+            context=f"正文生成（页面: {page_data['title']}）",
+            messages=messages,
+            error=str(e),
+        )
         return ""
 
 
@@ -1149,6 +1228,20 @@ def _merge_diagrams_into_prose(prose: str, diagrams_raw: str) -> str:
     return re.sub(r'\[DIAGRAM_\d+\]', '', result)
 
 
+def _fix_bold_formatting(content: str) -> str:
+    """修复 LLM 输出的 '** text**' 错误加粗格式（** 后紧跟空格导致 Markdown 不渲染）。
+    仅处理代码围栏以外的正文段落，避免误改代码块中的 ** 幂运算符。
+    """
+    # 按代码围栏分割：偶数索引为正文，奇数索引为代码块
+    parts = re.split(r'(```[\s\S]*?```)', content)
+    fixed = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            part = re.sub(r'\*\*\s+(\S)', r'**\1', part)
+        fixed.append(part)
+    return ''.join(fixed)
+
+
 async def _generate_page_content(
     adapter, model: str, page_data: dict,
     section_title: str, repo_name: str, code_context: str,
@@ -1163,6 +1256,9 @@ async def _generate_page_content(
     """
     # Agent 1：规划（串行，为后续两个 Agent 提供上下文）
     plan = await _plan_page(adapter, model, page_data, section_title, repo_name, code_context)
+    # 归一化 diagram ID：无论 LLM 输出何种自定义名称，统一重映射为 DIAGRAM_N
+    for _i, _d in enumerate(plan.get("diagrams", []), 1):
+        _d["id"] = f"DIAGRAM_{_i}"
     logger.info(
         f"[WikiGenerator] 页面规划完成: {page_data['title']} "
         f"| 子章节={len(plan.get('subsections', []))} "
@@ -1180,6 +1276,13 @@ async def _generate_page_content(
 
     # 降级兜底：两个 Agent 都失败时回退到单 Agent
     if not content.strip():
+        # 记录两个 Agent 的实际返回，便于判断是 API 错误还是返回了空内容
+        _log_llm_failure(
+            context=f"三智能体均返回空内容（页面: {page_data['title']}），降级为单Agent",
+            messages=[],
+            response=f"[prose_raw]\n{prose_raw or '(empty)'}\n\n[diagrams_raw]\n{diagrams_raw or '(empty)'}",
+            error="两个 Agent 均返回空字符串（可能是 API 成功但内容为空，或 exception 已单独记录）",
+        )
         logger.warning(f"[WikiGenerator] 三智能体均失败，降级为单 Agent: {page_data['title']}")
         messages = [
             LLMMessage(role="system", content=MERMAID_CONSTRAINT_PROMPT),
@@ -1196,6 +1299,11 @@ async def _generate_page_content(
             response = await adapter.generate_with_rate_limit(messages=messages, model=model, temperature=0.5)
             content = response.content
         except Exception as e:
+            _log_llm_failure(
+                context=f"单Agent降级（页面: {page_data['title']}）",
+                messages=messages,
+                error=str(e),
+            )
             if is_token_overflow(e):
                 content = await generate_with_degradation(
                     adapter, model, page_data, section_title, repo_name,
@@ -1205,6 +1313,7 @@ async def _generate_page_content(
                 raise
 
     # 后处理流水线
+    content = _fix_bold_formatting(content)
     content = process_diagram_specs(content)
     content = await retry_failed_diagram_specs(content, adapter, model)
     content = await validate_and_fix_mermaid(adapter, model, content)
@@ -1228,15 +1337,26 @@ async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
     language_stats = "unknown"
 
     try:
-        # 获取更多 chunk 用于提取丰富的仓库信息
-        results = collection.get(limit=500, include=["metadatas"])
-        if results and results.get("metadatas"):
+        # 分批获取所有 chunk 的元数据，避免 SQLite "too many SQL variables" 错误
+        # （limit=None 会生成超长 IN 子句，chunk 数 > 999 时必然崩溃）
+        _BATCH = 500
+        all_metadatas: list = []
+        _offset = 0
+        while True:
+            _batch = collection.get(limit=_BATCH, offset=_offset, include=["metadatas"])
+            _metas = (_batch or {}).get("metadatas") or []
+            all_metadatas.extend(_metas)
+            if len(_metas) < _BATCH:
+                break
+            _offset += _BATCH
+
+        if all_metadatas:
             file_counts: Dict[str, int] = {}
 
             # 构建文件摘要（函数/类清单）
             file_summary_map: Dict[str, dict] = {}  # file_path -> {language, functions: [], classes: []}
 
-            for meta in results["metadatas"]:
+            for meta in all_metadatas:
                 if meta:
                     lang = meta.get("language", "")
                     if lang:
@@ -1260,22 +1380,31 @@ async def _get_repo_summary(db: AsyncSession, repo_id: str, collection) -> dict:
             key_files = sorted(file_counts.keys(),
                                key=lambda f: file_counts[f], reverse=True)[:10]
 
-            # 构建文件树字符串（按目录分组）
+            # 构建文件树字符串（按目录分组，覆盖所有目录）
             dirs: Dict[str, list] = {}
-            for fp in sorted(file_summary_map.keys())[:50]:
+            for fp in sorted(file_summary_map.keys()):
                 parts = fp.replace("\\", "/").split("/")
                 d = "/".join(parts[:-1]) or "(root)"
                 dirs.setdefault(d, []).append(parts[-1])
             file_tree_lines = []
-            for d, files in sorted(dirs.items())[:20]:
+            for d, files in sorted(dirs.items()):
                 file_tree_lines.append(f"  {d}/")
-                for f in files[:10]:
+                for f in files[:15]:
                     file_tree_lines.append(f"    {f}")
             file_tree = "\n".join(file_tree_lines) or "(empty)"
+            # 字符预算：超出时截断并提示
+            if len(file_tree) > 6000:
+                file_tree = file_tree[:6000] + "\n  ... (truncated)"
 
-            # 构建文件摘要字符串（含函数/类）
+            # 构建文件摘要字符串（按 chunk 数量排序，最重要的文件优先）
+            top_files_by_importance = sorted(
+                file_counts.keys(), key=lambda f: file_counts[f], reverse=True
+            )[:50]
             file_summaries_lines = []
-            for fp, info in list(file_summary_map.items())[:20]:
+            for fp in top_files_by_importance:
+                if fp not in file_summary_map:
+                    continue
+                info = file_summary_map[fp]
                 line = f"- {fp}"
                 if info["classes"]:
                     line += f"  classes: {', '.join(info['classes'][:5])}"
@@ -1428,7 +1557,7 @@ async def _retrieve_code_context(
     return "\n\n".join(parts)
 
 
-def _parse_wiki_outline(content: str) -> dict:
+def _parse_wiki_outline(content: str) -> Optional[dict]:
     """
     解析 LLM 返回的 XML 大纲。
     支持容错：提取 XML 片段，忽略前后的多余文本。
@@ -1453,6 +1582,7 @@ def _parse_wiki_outline(content: str) -> dict:
             }
         ]
     }
+    解析失败时返回 None，由调用方决定是否重试。
     """
     # 尝试提取 <wiki_structure>...</wiki_structure> 片段
     xml_match = re.search(
@@ -1460,16 +1590,16 @@ def _parse_wiki_outline(content: str) -> dict:
         content, re.DOTALL
     )
     if not xml_match:
-        logger.warning("[WikiGenerator] XML 大纲解析失败，使用默认大纲")
-        return _default_outline()
+        logger.warning("[WikiGenerator] 未找到 <wiki_structure> 标签，解析失败")
+        return None
 
     xml_text = xml_match.group(0)
 
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as e:
-        logger.warning(f"[WikiGenerator] XML 解析错误: {e}，使用默认大纲")
-        return _default_outline()
+        logger.warning(f"[WikiGenerator] XML 解析错误: {e}")
+        return None
 
     # 解析 title
     title_el = root.find("title")
@@ -1839,6 +1969,7 @@ async def update_wiki_incrementally(
     if progress_callback:
         await progress_callback(99, f"增量更新完成：已更新 {updated_count} 个页面")
 
+    await adapter.aclose()
     return {
         "status": "updated",
         "wiki_id": wiki.id,
