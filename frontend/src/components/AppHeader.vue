@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 const isDark = ref(false)
+const mobileMenuOpen = ref(false)
 
 function applyTheme(dark: boolean) {
   isDark.value = dark
@@ -11,6 +12,18 @@ function applyTheme(dark: boolean) {
 
 function toggleTheme() {
   applyTheme(!isDark.value)
+}
+
+function toggleMobileMenu() {
+  mobileMenuOpen.value = !mobileMenuOpen.value
+}
+
+function closeMobileMenu() {
+  mobileMenuOpen.value = false
+}
+
+function handleOverlayClick() {
+  mobileMenuOpen.value = false
 }
 
 onMounted(() => {
@@ -24,6 +37,10 @@ onMounted(() => {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
     applyTheme(prefersDark)
   }
+})
+
+onUnmounted(() => {
+  mobileMenuOpen.value = false
 })
 </script>
 
@@ -57,8 +74,35 @@ onMounted(() => {
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+
+        <!-- Hamburger button: only visible on mobile -->
+        <button
+          class="hamburger-btn"
+          @click="toggleMobileMenu"
+          :aria-label="mobileMenuOpen ? '关闭菜单' : '打开菜单'"
+          :aria-expanded="mobileMenuOpen"
+        >
+          <!-- X icon when open -->
+          <svg v-if="mobileMenuOpen" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <!-- Hamburger icon when closed -->
+          <svg v-else viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
     </div>
+
+    <!-- Mobile nav dropdown -->
+    <div v-if="mobileMenuOpen" class="mobile-nav" role="navigation" aria-label="移动端导航">
+      <RouterLink to="/" class="mobile-nav-link" @click="closeMobileMenu">首页</RouterLink>
+      <RouterLink to="/repos" class="mobile-nav-link" @click="closeMobileMenu">仓库</RouterLink>
+      <RouterLink to="/system" class="mobile-nav-link" @click="closeMobileMenu">系统管理</RouterLink>
+    </div>
+
+    <!-- Overlay backdrop -->
+    <div v-if="mobileMenuOpen" class="mobile-overlay" @click="handleOverlayClick" aria-hidden="true" />
   </header>
 </template>
 
@@ -72,10 +116,15 @@ onMounted(() => {
   z-index: 100;
 }
 
+/* When mobile menu is open the header expands, so remove fixed height constraint */
+.app-header:has(.mobile-nav) {
+  height: auto;
+}
+
 .header-content {
   max-width: 1600px;
   margin: 0 auto;
-  height: 100%;
+  height: var(--header-height);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -169,7 +218,96 @@ onMounted(() => {
   height: 16px;
 }
 
+/* Hamburger button: hidden by default, visible only on mobile */
+.hamburger-btn {
+  display: none;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--text-tertiary);
+  transition: all 0.15s;
+  padding: 0;
+}
+
+.hamburger-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-color-strong);
+}
+
+.hamburger-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Mobile nav dropdown */
+.mobile-nav {
+  display: none;
+  flex-direction: column;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-color);
+  padding: 8px 0;
+}
+
+.mobile-nav-link {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 20px;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+  border-left: 3px solid transparent;
+}
+
+.mobile-nav-link:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.mobile-nav-link.router-link-active {
+  color: var(--color-primary);
+  border-left-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+[data-theme="dark"] .mobile-nav-link.router-link-active {
+  background: rgba(37, 99, 235, 0.1);
+}
+
+/* Overlay backdrop */
+.mobile-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  top: 0;
+  background: rgba(0, 0, 0, 0.3);
+  z-index: -1;
+}
+
 @media (max-width: 768px) {
-  .header-nav { display: none; }
+  .header-nav {
+    display: none;
+  }
+
+  .hamburger-btn {
+    display: flex;
+  }
+
+  .mobile-nav {
+    display: flex;
+  }
+
+  .mobile-overlay {
+    display: block;
+  }
 }
 </style>

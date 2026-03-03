@@ -486,3 +486,39 @@ button {
     --sidebar-width: 260px;
   }
 }
+
+/* ---- Mobile: code overflow fixes ---- */
+
+/* Inline code only (not inside pre): allow wrapping */
+.markdown-body :not(pre) > code {
+  word-break: break-word;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+/* Code block container */
+.code-block {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* Code block pre: keep horizontal scroll, no wrapping */
+.code-block pre {
+  word-break: normal;
+  overflow-wrap: normal;
+  white-space: pre;
+}
+
+/* Markdown pre: cap width so it doesn't blow out layout */
+.markdown-body pre {
+  max-width: 100%;
+}
+
+/* Mobile table: horizontal scroll */
+@media (max-width: 768px) {
+  .markdown-body table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}

@@ -714,8 +714,16 @@ async function handleSubmit() {
 
 /* ── Responsive ───────────────────────────────────── */
 @media (max-width: 640px) {
+  .home-view { padding-top: 24px; }
   .url-input-row { flex-direction: column; }
   .form-row { grid-template-columns: 1fr; }
-  .hero__title { font-size: 2rem; }
+  .hero__title { font-size: 1.75rem; }
+  .hero__subtitle { font-size: 0.9rem; }
+  .task-banner { word-break: break-word; }
+  .features { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 380px) {
+  .hero__title { font-size: 1.5rem; }
 }
 </style>

@@ -200,3 +200,10 @@ watch(parsedBlocks, (blocks) => {
 .code-ref-chip__info { opacity: 0.7; }
 .code-ref-chip svg { width: 13px; height: 13px; }
 </style>
+
+<style scoped>
+.markdown-view {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+</style>

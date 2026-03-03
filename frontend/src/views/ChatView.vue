@@ -14,6 +14,10 @@ const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
 
+// Mobile detection
+const isMobile = ref(window.innerWidth <= 1024)
+function handleResize() { isMobile.value = window.innerWidth <= 1024 }
+
 function generateId(): string {
   if (typeof crypto !== 'undefined' && typeof (crypto as Crypto).randomUUID === 'function') {
     return (crypto as Crypto).randomUUID()
@@ -400,6 +404,7 @@ function highlightCode(code: string, lang: string): string {
 }
 
 onMounted(async () => {
+  window.addEventListener('resize', handleResize)
   const q = route.query.q as string | undefined
   const dr = route.query.dr === '1'
 
@@ -424,6 +429,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
   if (drContinueTimer) clearTimeout(drContinueTimer)
   if (activeEventSource) activeEventSource.close()
   if (activeAbortController) activeAbortController.abort()
@@ -499,7 +505,7 @@ onUnmounted(() => {
               v-for="msg in chatStore.messages"
               :key="msg.id"
               :message="msg"
-              :compact-code="true"
+              :compact-code="!isMobile"
               @ref-click="loadFilePanel"
               @code-blocks="handleCodeBlocks"
               @code-block-focus="handleCodeBlockFocus"
@@ -1034,6 +1040,15 @@ onUnmounted(() => {
 @media (max-width: 1024px) {
   .chat-left { flex: 0 0 100%; }
   .code-panel { display: none; }
+}
+
+@media (max-width: 640px) {
+  .chat-header { padding: 0 12px; height: 44px; }
+  .chat-title { font-size: 14px; }
+  .chat-messages { padding: 12px; }
+  .chat-empty { padding: 40px 16px; }
+  .suggestion-chip { font-size: 11px; padding: 5px 10px; }
+  .back-btn span { display: none; }
 }
 
 /* ── Deep Research Progress Card ───────────────────────── */

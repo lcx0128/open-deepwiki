@@ -171,4 +171,11 @@ function formatTime(ts: number) {
   color: var(--text-muted);
   padding: 0 4px;
 }
+
+@media (max-width: 640px) {
+  .bubble__body { max-width: 90%; }
+  .bubble__body pre { max-width: 100%; overflow-x: auto; }
+  .bubble__body code { word-break: break-word; overflow-wrap: break-word; }
+  .bubble__refs { flex-wrap: wrap; }
+}
 </style>
