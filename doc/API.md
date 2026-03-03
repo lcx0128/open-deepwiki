@@ -1,6 +1,6 @@
 # API 接口文档
 
-> **版本**: 1.7.0 | **最后更新**: 2026-03-01
+> **版本**: 1.8.0 | **最后更新**: 2026-03-03
 >
 > Base URL: `http://localhost:8000`
 
@@ -9,6 +9,64 @@
 ## 概述
 
 Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SSE 流式推送。
+
+当 `AUTH_ENABLED=true` 时，除 `/health`、`/api/auth/status`、`/api/auth/login` 外，所有端点均需在请求头携带有效会话 token：
+
+```
+Authorization: Bearer <token>
+```
+
+SSE 端点（`EventSource` 不支持自定义 header）改用查询参数传递：`?token=<token>`。
+
+---
+
+## 访问鉴权
+
+> 以下三个端点始终公开，无需鉴权。
+
+### GET /api/auth/status
+
+查询鉴权是否已启用，前端据此决定是否展示登录页。
+
+**响应 200**:
+```json
+{ "enabled": true }
+```
+
+---
+
+### POST /api/auth/login
+
+验证访问口令，成功后颁发会话 token（存储于 Redis，有效期由 `AUTH_SESSION_EXPIRE_HOURS` 控制，默认 168 小时）。
+
+**请求体**:
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `password` | string | 是 | 访问口令（对应 `.env` 中 `AUTH_PASSWORD`） |
+
+**成功响应 200**:
+```json
+{ "token": "随机生成的会话 token" }
+```
+
+**错误响应**:
+| 状态码 | 说明 |
+|--------|------|
+| 401 | 口令错误 |
+| 503 | 服务端未配置 `AUTH_PASSWORD` |
+
+---
+
+### POST /api/auth/logout
+
+使当前会话 token 立即失效。
+
+**请求头**: `Authorization: Bearer <token>`
+
+**响应 200**:
+```json
+{ "message": "已登出" }
+```
 
 ---
 
