@@ -946,6 +946,59 @@ onMounted(async () => {
 @media (max-width: 640px) {
   .repo-grid { grid-template-columns: 1fr; }
   .page-header { flex-direction: column; gap: 16px; }
+  .page-title { font-size: var(--font-size-xl); }
+  .page-header .btn { width: 100%; justify-content: center; }
+
+  /* Form rows collapse to single column inside modals */
+  .form-row { grid-template-columns: 1fr; }
+
+  /* Modals get constrained height and proper mobile padding */
+  .modal {
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: 20px 16px;
+  }
+  .sync-modal {
+    max-width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: 20px 16px;
+  }
+
+  /* Commit grid collapses to single column */
+  .commit-item {
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+  }
+  .commit-meta {
+    grid-column: 1 / -1;
+    padding-top: 2px;
+  }
+
+  /* Action buttons get adequate touch target size */
+  .repo-card__actions { gap: 8px; }
+  .repo-card__actions .btn { min-height: 36px; }
+
+  /* Filter bar wraps on small screens */
+  .filter-bar { flex-direction: column; align-items: flex-start; }
+  .filter-group { flex-wrap: wrap; }
+}
+
+@media (max-width: 480px) {
+  .repo-list-view { padding: 20px 12px 60px; }
+
+  /* URL text breaks to prevent overflow */
+  .repo-card__url {
+    white-space: normal;
+    word-break: break-all;
+  }
+
+  /* Ensure URL input is full width inside modals */
+  .modal .form-input,
+  .sync-modal .form-input { width: 100%; box-sizing: border-box; }
+
+  /* Modal overlay reduces padding so modal fills screen better */
+  .modal-overlay { padding: 12px; }
 }
 
 /* ── Sync modal advanced options ──────────────────── */

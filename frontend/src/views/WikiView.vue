@@ -870,12 +870,56 @@ watch(() => wikiStore.activePageId, async () => {
 
 @media (max-width: 768px) {
   .wiki-toc { display: none; }
-  .wiki-content-body { padding: 16px 20px; }
-  .mobile-menu-btn { display: flex; }
-  .wiki-chat-bar { left: 0; padding: 12px 16px 20px; }
-  .wiki-toolbar { padding: 0 12px; }
+  .wiki-content-body { padding: 16px 16px; }
+  .mobile-menu-btn {
+    display: flex;
+    width: 36px;
+    height: 36px;
+  }
+  .wiki-chat-bar { left: 0; right: 0; padding: 12px 16px 20px; }
+  .wiki-toolbar { padding: 0 8px; }
   :deep(.sidebar--mobile-open) {
     transform: translateX(0) !important;
+  }
+
+  /* Hide toolbar text labels, keep icons */
+  .toolbar-btn span:not(.toolbar-btn__hint) {
+    display: none;
+  }
+
+  /* Hide keyboard shortcut hints */
+  .toolbar-btn__hint { display: none; }
+
+  /* Minimum 36px touch target for toolbar buttons */
+  .toolbar-btn {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 6px 8px;
+    justify-content: center;
+  }
+
+  /* More prominent hamburger button */
+  .mobile-menu-btn {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+  }
+  .mobile-menu-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .mobile-menu-btn svg { width: 20px; height: 20px; }
+
+  /* Breadcrumb should not overflow */
+  .wiki-breadcrumb {
+    font-size: 12px;
+  }
+  .breadcrumb-item:first-child {
+    display: none;
+  }
+  .breadcrumb-sep {
+    display: none;
   }
 }
 

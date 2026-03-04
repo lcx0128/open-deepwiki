@@ -1829,4 +1829,41 @@ onMounted(() => {
 
 .test-result--ok { color: var(--color-success, #16a34a); }
 .test-result--err { color: var(--color-error, #dc2626); }
+
+/* ── Mobile improvements ──────────────────────────────────────────────────── */
+
+/* Storage card path text can overflow on mobile */
+.storage-card__path { word-break: break-all; white-space: normal; }
+
+@media (max-width: 640px) {
+  /* Reduce top padding */
+  .system-view { padding: 20px 16px 60px; }
+  .page-title { font-size: var(--font-size-xl); }
+
+  /* Config card fills width */
+  .config-card { max-width: 100%; }
+
+  /* Tab bar touch scrolling, hide scrollbar, compact buttons */
+  .tab-bar { -webkit-overflow-scrolling: touch; }
+  .tab-bar::-webkit-scrollbar { display: none; }
+  .tab-btn { padding: 10px 14px; font-size: 12px; }
+  .tab-btn .tab-icon { display: none; }
+
+  /* Test row wraps on mobile */
+  .test-row { flex-wrap: wrap; }
+  .test-model-input { max-width: 100%; width: 100%; flex: none; }
+  .test-result { width: 100%; max-width: 100%; overflow: visible; white-space: normal; }
+
+  /* Task table compact on mobile */
+  .task-table th,
+  .task-table td { padding: 8px 10px; font-size: 11px; }
+  .td-date { display: none; }
+  .td-progress { min-width: 80px; }
+}
+
+@media (max-width: 480px) {
+  /* Cleanup button full width on very small screens */
+  .cleanup-header { flex-direction: column; }
+  .cleanup-header .btn { width: 100%; justify-content: center; }
+}
 </style>
