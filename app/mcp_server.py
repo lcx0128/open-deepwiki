@@ -595,13 +595,35 @@ def main() -> None:
             async def dispatch(self, request: Request, call_next):
                 if settings.MCP_AUTH_TOKEN:
                     auth = request.headers.get("Authorization", "")
-                    if not auth.startswith("Bearer ") or auth[7:] != settings.MCP_AUTH_TOKEN:
+                    if not auth.startswith("Bearer ") or auth[7:].strip() != settings.MCP_AUTH_TOKEN.strip():
                         return JSONResponse({"error": "Unauthorized"}, status_code=401)
                 return await call_next(request)
+
+        class ProxyHostMiddleware:
+            """ASGI 中间件：将 Host 请求头重写为 localhost，绕过 MCP SDK 的反向代理 421 问题。
+
+            mcp.server.transport_security 模块直接读取 HTTP Host 头并与白名单比对
+            （默认仅允许 localhost/127.0.0.1），反向代理后 Host 为公网 IP 导致 421。
+            此中间件在请求到达 MCP SDK 前将 Host 头替换为 localhost:PORT。
+            """
+            def __init__(self, app, port: int):
+                self.app = app
+                self._local_host = f"localhost:{port}".encode()
+
+            async def __call__(self, scope, receive, send):
+                if scope["type"] in ("http", "websocket"):
+                    new_headers = [
+                        (b"host", self._local_host) if name == b"host" else (name, value)
+                        for name, value in scope.get("headers", [])
+                    ]
+                    scope = {**scope, "headers": new_headers}
+                await self.app(scope, receive, send)
 
         starlette_app = mcp.streamable_http_app()
         if settings.MCP_AUTH_TOKEN:
             starlette_app.add_middleware(BearerAuthMiddleware)
+        # 必须在最外层包裹，确保在 MCP SDK 的 Host 校验之前执行
+        starlette_app = ProxyHostMiddleware(starlette_app, port=args.port)
 
         logger.info(f"[MCP] 启动 HTTP 模式，监听 {args.host}:{args.port}")
         uvicorn.run(starlette_app, host=args.host, port=args.port, log_config=None)
