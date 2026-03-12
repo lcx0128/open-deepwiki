@@ -128,7 +128,7 @@ services:
     container_name: deepwiki-frontend
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "${FRONTEND_PORT:-80}:80"
     depends_on:
       - api
 
