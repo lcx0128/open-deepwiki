@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getRepositories, deleteRepository, reprocessRepository, syncRepository, abortRepository, getPendingCommits, type CommitInfo } from '@/api/repositories'
+import { updateRepositoryPublic } from '@/api/repositories'
 import { regenerateWiki } from '@/api/wiki'
 import { getSystemConfig } from '@/api/system'
 import { useRepoStore } from '@/stores/repo'
@@ -9,11 +10,13 @@ import { useTaskStore } from '@/stores/task'
 import { useEventSource } from '@/composables/useEventSource'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { RepositoryItem } from '@/api/repositories'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
 const repoStore = useRepoStore()
 const taskStore = useTaskStore()
 const { connectSSE } = useEventSource()
+const authStore = useAuthStore()
 
 const filterStatus = ref('')
 const deleteTarget = ref<RepositoryItem | null>(null)
@@ -260,15 +263,29 @@ function formatDate(dateStr: string | null) {
   })
 }
 
+async function togglePublic(repo: RepositoryItem) {
+  try {
+    const result = await updateRepositoryPublic(repo.id, !repo.is_public)
+    // 更新本地状态
+    const found = repoStore.repos.find(r => r.id === repo.id)
+    if (found) found.is_public = result.is_public
+  } catch {
+    repoStore.error = '更新公开状态失败'
+  }
+}
+
 onMounted(async () => {
   await loadRepos()
-  try {
-    const cfg = await getSystemConfig()
-    if (cfg.is_customized) {
-      if (cfg.llm.default_provider) defaultLlmProvider.value = cfg.llm.default_provider
-      if (cfg.llm.default_model)    defaultLlmModel.value    = cfg.llm.default_model
-    }
-  } catch { /* 静默忽略 */ }
+  // 仅认证用户需要 LLM 配置（访客无法触发写操作）
+  if (authStore.isAuthenticated) {
+    try {
+      const cfg = await getSystemConfig()
+      if (cfg.is_customized) {
+        if (cfg.llm.default_provider) defaultLlmProvider.value = cfg.llm.default_provider
+        if (cfg.llm.default_model)    defaultLlmModel.value    = cfg.llm.default_model
+      }
+    } catch { /* 静默忽略 */ }
+  }
 })
 </script>
 
@@ -280,7 +297,7 @@ onMounted(async () => {
         <h1 class="page-title">仓库管理</h1>
         <p class="page-desc">管理已处理的代码仓库与 Wiki 文档</p>
       </div>
-      <RouterLink to="/" class="btn btn-primary">
+      <RouterLink v-if="authStore.isAuthenticated" to="/" class="btn btn-primary">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" style="width:14px;height:14px;margin-right:5px;vertical-align:-1px">
           <path d="M8 2v12M2 8h12" stroke-linecap="round"/>
         </svg>
@@ -388,6 +405,19 @@ onMounted(async () => {
           <span>创建：{{ formatDate(repo.created_at) }}</span>
         </div>
 
+        <!-- 公开展示开关（仅认证用户可见） -->
+        <div v-if="authStore.isAuthenticated" class="repo-card__public-toggle">
+          <label class="toggle-label">
+            <input
+              type="checkbox"
+              class="toggle-checkbox"
+              :checked="repo.is_public"
+              @change="togglePublic(repo)"
+            />
+            <span class="toggle-text">{{ repo.is_public ? '公开展示' : '仅自己可见' }}</span>
+          </label>
+        </div>
+
         <!-- 操作按钮 -->
         <div class="repo-card__actions">
           <RouterLink
@@ -397,62 +427,65 @@ onMounted(async () => {
           >
             查看 Wiki
           </RouterLink>
-          <RouterLink
-            v-if="repo.status === 'ready'"
-            :to="{ name: 'chat', params: { repoId: repo.id } }"
-            class="btn btn-secondary btn-sm"
-          >
-            AI 问答
-          </RouterLink>
-          <button
-            v-if="repo.status === 'ready'"
-            class="btn btn-secondary btn-sm"
-            :disabled="actionLoading === repo.id"
-            @click="handleSync(repo)"
-          >
-            增量更新
-          </button>
-          <!-- 中止按钮：任务进行中时显示 -->
-          <button
-            v-if="['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing'].includes(repo.status)"
-            class="btn btn-ghost btn-sm btn-warning-ghost"
-            :disabled="actionLoading === repo.id"
-            @click="abortTarget = repo"
-          >
-            中止
-          </button>
-          <!-- 重新处理：已中断或失败时显示 -->
-          <button
-            v-if="repo.status === 'interrupted' || (repo.status === 'error' && repo.failed_at_stage === 'generating')"
-            class="btn btn-primary btn-sm"
-            :disabled="actionLoading === repo.id"
-            @click="handleReprocess(repo)"
-          >
-            <span v-if="actionLoading === repo.id">处理中...</span>
-            <span v-else>重新处理</span>
-          </button>
-          <button
-            v-if="repo.status === 'error' && repo.failed_at_stage === 'generating'"
-            class="btn btn-secondary btn-sm"
-            :disabled="actionLoading === repo.id"
-            @click="handleRegenerate(repo)"
-          >重新生成 Wiki</button>
-          <button
-            v-if="!['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing', 'interrupted'].includes(repo.status) && !(repo.status === 'error' && repo.failed_at_stage === 'generating')"
-            class="btn btn-secondary btn-sm"
-            :disabled="actionLoading === repo.id"
-            @click="handleReprocess(repo)"
-          >
-            <span v-if="actionLoading === repo.id">处理中...</span>
-            <span v-else>重新处理</span>
-          </button>
-          <button
-            class="btn btn-ghost btn-sm btn-danger-ghost"
-            :disabled="actionLoading === repo.id"
-            @click="deleteTarget = repo"
-          >
-            删除
-          </button>
+          <!-- 以下操作仅认证用户可见 -->
+          <template v-if="authStore.isAuthenticated">
+            <RouterLink
+              v-if="repo.status === 'ready'"
+              :to="{ name: 'chat', params: { repoId: repo.id } }"
+              class="btn btn-secondary btn-sm"
+            >
+              AI 问答
+            </RouterLink>
+            <button
+              v-if="repo.status === 'ready'"
+              class="btn btn-secondary btn-sm"
+              :disabled="actionLoading === repo.id"
+              @click="handleSync(repo)"
+            >
+              增量更新
+            </button>
+            <!-- 中止按钮：任务进行中时显示 -->
+            <button
+              v-if="['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing'].includes(repo.status)"
+              class="btn btn-ghost btn-sm btn-warning-ghost"
+              :disabled="actionLoading === repo.id"
+              @click="abortTarget = repo"
+            >
+              中止
+            </button>
+            <!-- 重新处理：已中断或失败时显示 -->
+            <button
+              v-if="repo.status === 'interrupted' || (repo.status === 'error' && repo.failed_at_stage === 'generating')"
+              class="btn btn-primary btn-sm"
+              :disabled="actionLoading === repo.id"
+              @click="handleReprocess(repo)"
+            >
+              <span v-if="actionLoading === repo.id">处理中...</span>
+              <span v-else>重新处理</span>
+            </button>
+            <button
+              v-if="repo.status === 'error' && repo.failed_at_stage === 'generating'"
+              class="btn btn-secondary btn-sm"
+              :disabled="actionLoading === repo.id"
+              @click="handleRegenerate(repo)"
+            >重新生成 Wiki</button>
+            <button
+              v-if="!['pending', 'cloning', 'parsing', 'embedding', 'generating', 'syncing', 'interrupted'].includes(repo.status) && !(repo.status === 'error' && repo.failed_at_stage === 'generating')"
+              class="btn btn-secondary btn-sm"
+              :disabled="actionLoading === repo.id"
+              @click="handleReprocess(repo)"
+            >
+              <span v-if="actionLoading === repo.id">处理中...</span>
+              <span v-else>重新处理</span>
+            </button>
+            <button
+              class="btn btn-ghost btn-sm btn-danger-ghost"
+              :disabled="actionLoading === repo.id"
+              @click="deleteTarget = repo"
+            >
+              删除
+            </button>
+          </template>
         </div>
       </div>
     </div>
@@ -1131,5 +1164,31 @@ onMounted(async () => {
   width: 14px;
   height: 14px;
   border-width: 2px;
+}
+
+/* ── Public toggle ────────────────────────────────── */
+.repo-card__public-toggle {
+  display: flex;
+  align-items: center;
+}
+
+.toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-checkbox {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--color-primary);
+}
+
+.toggle-text {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
 }
 </style>

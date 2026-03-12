@@ -11,6 +11,7 @@ import WikiSidebar from '@/components/WikiSidebar.vue'
 import MarkdownView from '@/components/MarkdownView.vue'
 import WikiSearch from '@/components/WikiSearch.vue'
 import WikiRegenerateDialog from '@/components/WikiRegenerateDialog.vue'
+import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ repoId: string }>()
 const router = useRouter()
@@ -18,6 +19,7 @@ const wikiStore = useWikiStore()
 const taskStore = useTaskStore()
 const repoStore = useRepoStore()
 const { connectSSE } = useEventSource()
+const authStore = useAuthStore()
 
 const currentRepo = computed(() => repoStore.repos.find(r => r.id === props.repoId))
 
@@ -359,6 +361,7 @@ watch(() => wikiStore.activePageId, async () => {
             </button>
             <div class="toolbar-divider" />
             <button
+              v-if="authStore.isAuthenticated"
               class="toolbar-btn"
               @click="handleRegenerate"
               :disabled="isRegenerating"
@@ -372,6 +375,7 @@ watch(() => wikiStore.activePageId, async () => {
               <span class="toolbar-btn__hint">全量/部分</span>
             </button>
             <button
+              v-if="authStore.isAuthenticated"
               class="toolbar-btn"
               @click="handleExportMarkdown"
               :disabled="!wikiStore.wiki"
@@ -384,8 +388,8 @@ watch(() => wikiStore.activePageId, async () => {
               </svg>
               <span>导出 MD</span>
             </button>
-            <div class="toolbar-divider" />
-            <button class="toolbar-btn toolbar-btn--danger" @click="showDeleteConfirm = true" title="删除 Wiki">
+            <div v-if="authStore.isAuthenticated" class="toolbar-divider" />
+            <button v-if="authStore.isAuthenticated" class="toolbar-btn toolbar-btn--danger" @click="showDeleteConfirm = true" title="删除 Wiki">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"/>
                 <path d="M19 6l-1 14H6L5 6M10 11v6M14 11v6M9 6V4h6v2"/>
@@ -438,7 +442,7 @@ watch(() => wikiStore.activePageId, async () => {
         </div>
 
         <!-- Bottom chat bar (fixed) -->
-        <div class="wiki-chat-bar">
+        <div v-if="authStore.isAuthenticated" class="wiki-chat-bar">
           <div class="chat-bar__inner">
             <!-- Deep research toggle -->
             <button

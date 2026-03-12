@@ -14,6 +14,7 @@ from app.models.task import Task, TaskStatus
 from app.models.repository import Repository
 from app.config import settings
 from app.core.system_config import get_effective_config, update_system_config
+from app.core.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -200,14 +201,14 @@ async def _scan_orphans(db: AsyncSession) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/config", summary="获取当前生效配置（API key 脱敏）")
-async def get_config():
+async def get_config(_: None = Depends(require_auth)):
     """返回当前生效的系统配置，API key 已脱敏处理。"""
     raw = await asyncio.to_thread(get_effective_config)
     return _build_config_response(raw)
 
 
 @router.put("/config", summary="更新系统配置")
-async def put_config(body: dict):
+async def put_config(body: dict, _: None = Depends(require_auth)):
     """
     更新系统配置。body 结构与 GET /api/system/config 响应相同。
     以 "****" 开头的 API key 值会被自动跳过（未修改）。
@@ -221,7 +222,7 @@ async def put_config(body: dict):
 
 
 @router.get("/health", summary="系统健康检查")
-async def get_health(db: AsyncSession = Depends(get_db)):
+async def get_health(db: AsyncSession = Depends(get_db), _: None = Depends(require_auth)):
     """并发检查数据库、Redis、ChromaDB、Celery Worker 各服务状态。"""
 
     async def _check_database() -> dict:
@@ -315,6 +316,7 @@ async def list_tasks(
     per_page: int = Query(20, ge=1, le=100, description="每页数量"),
     status: Optional[str] = Query(None, description="按状态过滤"),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
 ):
     """分页获取所有任务，可按状态过滤，包含关联仓库名称。"""
     query = (
@@ -369,7 +371,7 @@ async def list_tasks(
 
 
 @router.post("/tasks/{task_id}/cancel", summary="取消指定任务")
-async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db)):
+async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db), _: None = Depends(require_auth)):
     """取消指定任务。已处于终态的任务返回 400。"""
     task = await db.get(Task, task_id)
     if not task:
@@ -400,7 +402,7 @@ async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/storage", summary="查询存储用量")
-async def get_storage():
+async def get_storage(_: None = Depends(require_auth)):
     """查询各存储目录的磁盘占用情况。"""
     repos_base = Path(settings.REPOS_BASE_DIR)
     chromadb_path = Path(settings.CHROMADB_PATH)
@@ -459,13 +461,13 @@ async def get_storage():
 
 
 @router.post("/cleanup/scan", summary="扫描孤儿数据（预览）")
-async def cleanup_scan(db: AsyncSession = Depends(get_db)):
+async def cleanup_scan(db: AsyncSession = Depends(get_db), _: None = Depends(require_auth)):
     """扫描不属于任何仓库的孤儿目录和 ChromaDB 集合（只读，不执行删除）。"""
     return await _scan_orphans(db)
 
 
 @router.post("/cleanup/execute", summary="执行孤儿数据清理")
-async def cleanup_execute(db: AsyncSession = Depends(get_db)):
+async def cleanup_execute(db: AsyncSession = Depends(get_db), _: None = Depends(require_auth)):
     """重新扫描并删除孤儿目录和 ChromaDB 集合，返回清理结果。"""
     # 安全检查：存在活跃任务时拒绝清理，避免删除正在使用的目录
     active_count_result = await db.execute(
@@ -535,7 +537,7 @@ async def cleanup_execute(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/config/test", summary="测试 LLM 供应商连通性")
-async def test_llm_connection(body: dict):
+async def test_llm_connection(body: dict, _: None = Depends(require_auth)):
     """
     使用提供的凭证测试 LLM 供应商的 API 连通性。
     如果 api_key 以 "****" 开头（脱敏值），则自动使用已保存的实际密钥。

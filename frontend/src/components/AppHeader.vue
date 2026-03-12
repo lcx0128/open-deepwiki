@@ -1,8 +1,18 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 
 const isDark = ref(false)
 const mobileMenuOpen = ref(false)
+
+const router = useRouter()
+const authStore = useAuthStore()
+
+async function handleLogout() {
+  await authStore.logout()
+  router.push('/login')
+}
 
 function applyTheme(dark: boolean) {
   isDark.value = dark
@@ -63,6 +73,35 @@ onUnmounted(() => {
         </nav>
       </div>
       <div class="header-right">
+        <!-- 登录/登出按钮（仅鉴权启用时显示） -->
+        <template v-if="authStore.authEnabled">
+          <button
+            v-if="authStore.isAuthenticated"
+            class="auth-btn"
+            @click="handleLogout"
+            title="登出"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" stroke-linecap="round" stroke-linejoin="round"/>
+              <polyline points="16 17 21 12 16 7" stroke-linecap="round" stroke-linejoin="round"/>
+              <line x1="21" y1="12" x2="9" y2="12" stroke-linecap="round"/>
+            </svg>
+            <span class="auth-btn__text">登出</span>
+          </button>
+          <RouterLink
+            v-else
+            to="/login"
+            class="auth-btn auth-btn--login"
+            title="登录"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" stroke-linecap="round" stroke-linejoin="round"/>
+              <polyline points="10 17 15 12 10 7" stroke-linecap="round" stroke-linejoin="round"/>
+              <line x1="15" y1="12" x2="3" y2="12" stroke-linecap="round"/>
+            </svg>
+            <span class="auth-btn__text">登录</span>
+          </RouterLink>
+        </template>
         <button class="theme-toggle" @click="toggleTheme" :aria-label="isDark ? '切换为亮色' : '切换为暗色'">
           <!-- Sun icon (show when dark, clicking switches to light) -->
           <svg v-if="isDark" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -99,6 +138,19 @@ onUnmounted(() => {
       <RouterLink to="/" class="mobile-nav-link" @click="closeMobileMenu">首页</RouterLink>
       <RouterLink to="/repos" class="mobile-nav-link" @click="closeMobileMenu">仓库</RouterLink>
       <RouterLink to="/system" class="mobile-nav-link" @click="closeMobileMenu">系统管理</RouterLink>
+      <template v-if="authStore.authEnabled">
+        <button
+          v-if="authStore.isAuthenticated"
+          class="mobile-nav-link mobile-auth-btn"
+          @click="() => { handleLogout(); closeMobileMenu() }"
+        >登出</button>
+        <RouterLink
+          v-else
+          to="/login"
+          class="mobile-nav-link"
+          @click="closeMobileMenu"
+        >登录</RouterLink>
+      </template>
     </div>
 
     <!-- Overlay backdrop -->
@@ -190,6 +242,62 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Auth button */
+.auth-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 10px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  text-decoration: none;
+  transition: all 0.15s;
+}
+
+.auth-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-color-strong);
+  text-decoration: none;
+}
+
+.auth-btn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.auth-btn--login {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.auth-btn--login:hover {
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.auth-btn__text {
+  white-space: nowrap;
+}
+
+.mobile-auth-btn {
+  background: none;
+  border: none;
+  border-left: 3px solid transparent;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
 }
 
 .theme-toggle {

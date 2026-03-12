@@ -3,7 +3,7 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +11,7 @@ from app.database import get_db
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import handle_chat, handle_chat_stream, handle_deep_research_stream
 from app.services.conversation_memory import get_history, session_exists
+from app.core.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
     "/sessions/{session_id}",
     summary="获取会话历史",
 )
-async def get_session(session_id: str):
+async def get_session(session_id: str, _: None = Depends(require_auth)):
     """
     获取指定会话的历史消息，用于前端刷新后恢复对话记录。
 
@@ -42,6 +43,7 @@ async def get_session(session_id: str):
 async def chat(
     request: ChatRequest,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
 ):
     """
     基于 RAG 的多轮对话接口。
@@ -106,6 +108,7 @@ async def chat_stream(
     llm_model: Optional[str] = Query(None, description="LLM 模型"),
     deep_research: bool = Query(False, description="是否启用 Deep Research 模式"),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
 ):
     """
     基于 RAG 的多轮对话流式接口（SSE）。

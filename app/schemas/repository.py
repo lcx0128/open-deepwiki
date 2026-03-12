@@ -38,6 +38,7 @@ class RepositoryListItem(BaseModel):
     default_branch: Optional[str] = "main"
     status: str
     failed_at_stage: Optional[str] = None
+    is_public: bool = False
     last_synced_at: Optional[datetime] = None
     created_at: datetime
 
@@ -66,3 +67,7 @@ class TaskStatusResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class UpdateRepositoryRequest(BaseModel):
+    is_public: bool

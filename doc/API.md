@@ -1,6 +1,6 @@
 # API 接口文档
 
-> **版本**: 1.8.0 | **最后更新**: 2026-03-03
+> **版本**: 1.9.0 | **最后更新**: 2026-03-12
 >
 > Base URL: `http://localhost:8000`
 
@@ -10,13 +10,23 @@
 
 Open-DeepWiki REST API，使用 FastAPI 构建，支持 JSON 请求/响应和 SSE 流式推送。
 
-当 `AUTH_ENABLED=true` 时，除 `/health`、`/api/auth/status`、`/api/auth/login` 外，所有端点均需在请求头携带有效会话 token：
+当 `AUTH_ENABLED=true` 时，大多数写操作端点需在请求头携带有效会话 token：
 
 ```
 Authorization: Bearer <token>
 ```
 
 SSE 端点（`EventSource` 不支持自定义 header）改用查询参数传递：`?token=<token>`。
+
+### 访客访问规则（AUTH_ENABLED=true）
+
+| 端点 | 未认证访客 | 认证用户 |
+|------|-----------|---------|
+| `GET /api/repositories` | 仅返回 `is_public=true` 的仓库 | 返回全部仓库 |
+| `GET /api/wiki/{repo_id}` | 仅允许访问 `is_public=true` 的 Wiki | 所有 Wiki |
+| `GET /api/repositories/{repo_id}/file` | 仅允许访问 `is_public=true` 的仓库文件 | 所有仓库文件 |
+| 所有写操作（POST/PATCH/DELETE） | 401 未授权 | 正常操作 |
+| `GET /api/chat/*`, `GET /api/system/*` | 401 未授权 | 正常操作 |
 
 ---
 
@@ -92,6 +102,8 @@ SSE 端点（`EventSource` 不支持自定义 header）改用查询参数传递�
 
 提交仓库处理任务。接收仓库 URL，创建 Repository 和 Task 记录，推入 Celery 队列，立即返回 Task ID。
 
+**鉴权**: 需要认证（`AUTH_ENABLED=true` 时）
+
 **请求体**:
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -133,7 +145,7 @@ SSE 端点（`EventSource` 不支持自定义 header）改用查询参数传递�
 
 ### GET /api/repositories
 
-获取仓库列表，支持分页和状态过滤。
+获取仓库列表，支持分页和状态过滤。未认证用户只返回 `is_public=true` 的仓库。
 
 **查询参数**:
 | 参数 | 类型 | 默认值 | 说明 |
@@ -151,8 +163,10 @@ SSE 端点（`EventSource` 不支持自定义 header）改用查询参数传递�
             "url": "https://github.com/owner/repo",
             "name": "owner/repo",
             "platform": "github",
+            "default_branch": "main",
             "status": "ready",
             "failed_at_stage": null,
+            "is_public": false,
             "last_synced_at": "2026-02-20T10:00:00Z",
             "created_at": "2026-02-19T08:00:00Z"
         }
@@ -162,6 +176,30 @@ SSE 端点（`EventSource` 不支持自定义 header）改用查询参数传递�
     "per_page": 20
 }
 ```
+
+---
+
+### PATCH /api/repositories/{repo_id}/public
+
+更新仓库的公开展示状态（是否允许未认证用户查看该仓库的 Wiki）。
+
+**鉴权**: 需要认证
+
+**请求体**:
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `is_public` | boolean | 是 | `true` 公开展示，`false` 仅自己可见 |
+
+**成功响应 200**:
+```json
+{ "id": "b2c3d4e5-...", "is_public": true }
+```
+
+**错误响应**:
+| 状态码 | 说明 |
+|--------|------|
+| 401 | 未授权 |
+| 404 | 仓库不存在 |
 
 ---
 

@@ -27,10 +27,17 @@ apiClient.interceptors.response.use(
           console.error('请求参数错误:', data?.detail || data)
           break
         case 401:
-          // token 失效或未登录，清除本地凭证并跳转登录页
+          // token 失效或未登录，清除本地凭证
           localStorage.removeItem(TOKEN_KEY)
-          if (window.location.pathname !== '/login') {
-            window.location.href = '/login'
+          // 访客可访问路由（/、/repos、/wiki/...）不触发强制跳转，
+          // 视图层已通过 authStore.isAuthenticated 守卫避免发起需认证的请求；
+          // 其他路由（/system、/chat 等）收到 401 则跳登录页。
+          {
+            const p = window.location.pathname
+            const isGuestPath = p === '/' || p === '/repos' || p.startsWith('/wiki/')
+            if (!isGuestPath && p !== '/login') {
+              window.location.href = '/login'
+            }
           }
           break
         case 404:

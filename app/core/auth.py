@@ -35,6 +35,26 @@ async def verify_session_token(token: str) -> bool:
     return bool(await redis.exists(f"{AUTH_TOKEN_PREFIX}{token}"))
 
 
+async def get_optional_auth(request: Request) -> bool:
+    """可选鉴权：返回 True 表示已认证，False 表示未认证（不会抛出 401）。
+    AUTH_ENABLED=False 时始终返回 True。
+    """
+    from app.config import settings
+
+    if not settings.AUTH_ENABLED:
+        return True
+
+    token: str | None = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.query_params.get("token")
+    if not token:
+        return False
+    return await verify_session_token(token)
+
+
 async def require_auth(request: Request) -> None:
     """FastAPI 依赖项：验证请求携带有效会话 token。
 

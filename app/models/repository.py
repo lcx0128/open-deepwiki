@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, Enum as SAEnum
+from sqlalchemy import Column, String, DateTime, Enum as SAEnum, Boolean
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -44,6 +44,7 @@ class Repository(Base):
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc)
     )
+    is_public = Column(Boolean, nullable=False, default=False, comment="是否公开展示（允许未认证用户查看 Wiki）")
 
     # 关系
     tasks = relationship("Task", back_populates="repository", cascade="all, delete-orphan")

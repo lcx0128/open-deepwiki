@@ -1,6 +1,6 @@
 from typing import Optional
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from app.database import get_db
@@ -13,8 +13,10 @@ from app.schemas.repository import (
     RepositoryListResponse,
     ReprocessRequest,
     IncrementalSyncRequest,
+    UpdateRepositoryRequest,
 )
 from app.utils.url_parser import parse_repo_url
+from app.core.auth import require_auth, get_optional_auth
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,7 @@ router = APIRouter(prefix="/api/repositories", tags=["repositories"])
 async def submit_repository(
     request: RepositoryCreateRequest,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
 ):
     """
     接收仓库 URL，创建 Repository 和 Task 记录，推入 Celery 队列，立即返回 Task ID。
@@ -124,14 +127,21 @@ async def submit_repository(
     summary="获取仓库列表",
 )
 async def list_repositories(
+    request: Request,
     page: int = Query(1, ge=1, description="页码"),
     per_page: int = Query(20, ge=1, le=100, description="每页数量"),
     status: Optional[str] = Query(None, description="过滤状态"),
     db: AsyncSession = Depends(get_db),
+    is_authed: bool = Depends(get_optional_auth),
 ):
     """获取仓库列表，支持分页和状态过滤。"""
     query = select(Repository)
     count_query = select(func.count(Repository.id))
+
+    # 未认证用户只能看公开仓库
+    if not is_authed:
+        query = query.where(Repository.is_public == True)
+        count_query = count_query.where(Repository.is_public == True)
 
     if status:
         try:
@@ -191,6 +201,7 @@ async def reprocess_repository(
     repo_id: str,
     request: ReprocessRequest,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
 ):
     """
     对已存在的仓库强制触发 FULL_PROCESS 任务（全量重新克隆、解析、向量化、生成 Wiki）。
@@ -256,6 +267,7 @@ async def sync_repository(
     repo_id: str,
     request: IncrementalSyncRequest,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
 ):
     """
     对已存在的仓库触发 INCREMENTAL_SYNC 任务（git pull + 只处理变更文件 + 重新生成 Wiki）。
@@ -320,7 +332,7 @@ async def sync_repository(
     status_code=status.HTTP_200_OK,
     summary="中止仓库当前所有生成任务",
 )
-async def abort_repository_tasks(repo_id: str, db: AsyncSession = Depends(get_db)):
+async def abort_repository_tasks(repo_id: str, db: AsyncSession = Depends(get_db), _: None = Depends(require_auth)):
     """
     中止指定仓库的所有活跃任务，将任务状态设为 INTERRUPTED，仓库状态设为 INTERRUPTED。
     中止后可通过「重新处理」恢复。
@@ -369,7 +381,7 @@ async def abort_repository_tasks(repo_id: str, db: AsyncSession = Depends(get_db
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除仓库及其所有关联数据",
 )
-async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db), _: None = Depends(require_auth)):
     """
     删除指定仓库及其全部关联数据：
     - 撤销所有活跃 Celery 任务（解除情景1卡死状态）
@@ -445,6 +457,26 @@ async def delete_repository(repo_id: str, db: AsyncSession = Depends(get_db)):
                 logger.warning(f"[RepoAPI] 删除本地目录失败（已忽略）: {e}")
 
 
+@router.patch(
+    "/{repo_id}/public",
+    status_code=status.HTTP_200_OK,
+    summary="更新仓库公开展示状态",
+)
+async def update_repository_public(
+    repo_id: str,
+    request: UpdateRepositoryRequest,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
+):
+    """更新仓库的 is_public 字段（是否允许未认证用户查看 Wiki）。"""
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="仓库不存在")
+    repo.is_public = request.is_public
+    await db.commit()
+    return {"id": repo_id, "is_public": repo.is_public}
+
+
 EXT_LANG = {
     '.py': 'python', '.ts': 'typescript', '.tsx': 'tsx',
     '.js': 'javascript', '.jsx': 'jsx', '.vue': 'vue',
@@ -468,6 +500,7 @@ async def read_repository_file(
     start_line: Optional[int] = Query(None, ge=1, description="起始行（1-indexed，含）"),
     end_line: Optional[int] = Query(None, ge=1, description="结束行（1-indexed，含）"),
     db: AsyncSession = Depends(get_db),
+    is_authed: bool = Depends(get_optional_auth),
 ):
     """
     读取已克隆仓库中指定文件的内容，支持按行范围切片。
@@ -476,6 +509,9 @@ async def read_repository_file(
     repo = await db.get(Repository, repo_id)
     if not repo or not repo.local_path:
         raise HTTPException(status_code=404, detail="仓库不存在或尚未克隆")
+
+    if not is_authed and not repo.is_public:
+        raise HTTPException(status_code=403, detail="该仓库未公开，请登录后访问")
 
     repo_root = Path(repo.local_path).resolve()
     target = (repo_root / path).resolve()
@@ -522,6 +558,7 @@ async def read_repository_file(
 async def get_pending_commits(
     repo_id: str,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_auth),
 ):
     """
     执行 git fetch 后，返回 HEAD..origin/{branch} 之间尚未同步的提交列表。

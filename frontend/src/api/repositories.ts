@@ -25,6 +25,7 @@ export interface RepositoryItem {
   last_synced_at: string | null
   created_at: string
   failed_at_stage?: string | null
+  is_public: boolean
 }
 
 export interface RepositoryListResponse {
@@ -145,6 +146,14 @@ export interface PendingCommitsResponse {
 export async function getPendingCommits(repoId: string): Promise<PendingCommitsResponse> {
   const response = await apiClient.get<PendingCommitsResponse>(
     `/repositories/${repoId}/pending-commits`
+  )
+  return response.data
+}
+
+export async function updateRepositoryPublic(repoId: string, isPublic: boolean): Promise<{ id: string; is_public: boolean }> {
+  const response = await apiClient.patch<{ id: string; is_public: boolean }>(
+    `/repositories/${repoId}/public`,
+    { is_public: isPublic }
   )
   return response.data
 }

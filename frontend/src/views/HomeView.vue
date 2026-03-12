@@ -6,8 +6,10 @@ import { useTaskStore } from '@/stores/task'
 import { useEventSource } from '@/composables/useEventSource'
 import { getSystemConfig } from '@/api/system'
 import ProgressBar from '@/components/ProgressBar.vue'
+import { useAuthStore } from '@/stores/auth'
 
 const taskStore = useTaskStore()
+const authStore = useAuthStore()
 const { connectSSE, closeSSE } = useEventSource()
 
 // 表单字段
@@ -66,61 +68,63 @@ function dismissTask(taskId: string) {
   delete showProgress.value[taskId]
 }
 
-// 页面挂载：从 localStorage 恢复所有活跃任务
+// 页面挂载：从 localStorage 恢复所有活跃任务（仅认证用户）
 onMounted(async () => {
-  let ids: string[] = []
+  if (authStore.isAuthenticated) {
+    let ids: string[] = []
 
-  const stored = localStorage.getItem('activeTaskIds')
-  if (stored) {
-    try { ids = JSON.parse(stored) } catch { /* ignore */ }
-  }
-  // 向后兼容：单任务 ID
-  if (ids.length === 0) {
-    const params = new URLSearchParams(window.location.search)
-    const single = params.get('taskId') || localStorage.getItem('activeTaskId')
-    if (single) ids = [single]
-  }
+    const stored = localStorage.getItem('activeTaskIds')
+    if (stored) {
+      try { ids = JSON.parse(stored) } catch { /* ignore */ }
+    }
+    // 向后兼容：单任务 ID
+    if (ids.length === 0) {
+      const params = new URLSearchParams(window.location.search)
+      const single = params.get('taskId') || localStorage.getItem('activeTaskId')
+      if (single) ids = [single]
+    }
 
-  const validIds: string[] = []
-  await Promise.all(ids.map(async (taskId) => {
+    const validIds: string[] = []
+    await Promise.all(ids.map(async (taskId) => {
+      try {
+        const task = await getTaskStatus(taskId)
+        taskStore.setTask({
+          id: task.id,
+          repoId: task.repo_id,
+          type: task.type,
+          status: task.status,
+          progressPct: task.progress_pct,
+          currentStage: task.current_stage || '',
+          filesTotal: task.files_total || 0,
+          filesProcessed: task.files_processed || 0,
+          errorMsg: task.error_msg,
+          wikiId: null,
+        })
+        validIds.push(taskId)
+        if (!TERMINAL.includes(task.status)) connectSSE(taskId)
+      } catch { /* 任务不存在，跳过 */ }
+    }))
+
+    // 清理失效的 ID
+    if (validIds.length !== ids.length) {
+      if (validIds.length > 0) {
+        localStorage.setItem('activeTaskIds', JSON.stringify(validIds))
+      } else {
+        localStorage.removeItem('activeTaskIds')
+        localStorage.removeItem('activeTaskId')
+      }
+    }
+    history.replaceState(null, '', window.location.pathname)
+
+    // 加载已保存的系统配置，预填充 LLM 供应商和模型（仅认证用户需要）
     try {
-      const task = await getTaskStatus(taskId)
-      taskStore.setTask({
-        id: task.id,
-        repoId: task.repo_id,
-        type: task.type,
-        status: task.status,
-        progressPct: task.progress_pct,
-        currentStage: task.current_stage || '',
-        filesTotal: task.files_total || 0,
-        filesProcessed: task.files_processed || 0,
-        errorMsg: task.error_msg,
-        wikiId: null,
-      })
-      validIds.push(taskId)
-      if (!TERMINAL.includes(task.status)) connectSSE(taskId)
-    } catch { /* 任务不存在，跳过 */ }
-  }))
-
-  // 清理失效的 ID
-  if (validIds.length !== ids.length) {
-    if (validIds.length > 0) {
-      localStorage.setItem('activeTaskIds', JSON.stringify(validIds))
-    } else {
-      localStorage.removeItem('activeTaskIds')
-      localStorage.removeItem('activeTaskId')
-    }
+      const cfg = await getSystemConfig()
+      if (cfg.is_customized) {
+        if (cfg.llm.default_provider) llmProvider.value = cfg.llm.default_provider
+        if (cfg.llm.default_model)    llmModel.value    = cfg.llm.default_model
+      }
+    } catch { /* 后端不可用时静默忽略，保持默认空值 */ }
   }
-  history.replaceState(null, '', window.location.pathname)
-
-  // 加载已保存的系统配置，预填充 LLM 供应商和模型
-  try {
-    const cfg = await getSystemConfig()
-    if (cfg.is_customized) {
-      if (cfg.llm.default_provider) llmProvider.value = cfg.llm.default_provider
-      if (cfg.llm.default_model)    llmModel.value    = cfg.llm.default_model
-    }
-  } catch { /* 后端不可用时静默忽略，保持默认空值 */ }
 })
 
 // 提交仓库
@@ -187,7 +191,8 @@ async function handleSubmit() {
         </p>
       </div>
 
-      <!-- 提交表单 -->
+      <!-- 提交表单（仅认证用户可见） -->
+      <template v-if="authStore.isAuthenticated">
       <div class="submit-card">
         <div class="form-group">
           <label class="form-label">仓库地址 <span class="required">*</span></label>
@@ -270,6 +275,16 @@ async function handleSubmit() {
           </div>
         </div>
       </div>
+      </template>
+      <template v-else-if="authStore.authEnabled">
+        <div class="submit-card guest-notice">
+          <p class="guest-notice__text">
+            请
+            <RouterLink to="/login" class="guest-notice__link">登录</RouterLink>
+            后添加仓库并生成 Wiki
+          </p>
+        </div>
+      </template>
 
       <!-- 任务列表横幅（每个活跃任务一行） -->
       <div v-if="hasTasks" class="task-banners">
@@ -726,4 +741,22 @@ async function handleSubmit() {
 @media (max-width: 380px) {
   .hero__title { font-size: 1.5rem; }
 }
+
+/* ── Guest notice ─────────────────────────────────── */
+.guest-notice {
+  text-align: center;
+  padding: 32px 24px;
+}
+
+.guest-notice__text {
+  font-size: var(--font-size-base);
+  color: var(--text-secondary);
+}
+
+.guest-notice__link {
+  color: var(--color-primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+.guest-notice__link:hover { text-decoration: underline; }
 </style>

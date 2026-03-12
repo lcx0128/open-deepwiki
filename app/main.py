@@ -67,10 +67,13 @@ from app.core.auth import require_auth
 # auth 路由公开访问（登录/登出/状态查询不需要鉴权）
 app.include_router(auth_router)
 
-# 其余路由受 require_auth 保护（AUTH_ENABLED=False 时依赖项直接放行）
-app.include_router(repositories_router, dependencies=[Depends(require_auth)])
+# repositories / wiki：读端点用 get_optional_auth（访客可读公开仓库），
+# 写端点各自声明 require_auth，无需路由器级别二次叠加
+app.include_router(repositories_router)
+app.include_router(wiki_router)
+
+# tasks / chat / system：全部需要认证，在路由器级别统一保护
 app.include_router(tasks_router, dependencies=[Depends(require_auth)])
-app.include_router(wiki_router, dependencies=[Depends(require_auth)])
 app.include_router(chat_router, dependencies=[Depends(require_auth)])
 app.include_router(system_router, dependencies=[Depends(require_auth)])
 

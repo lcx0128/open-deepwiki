@@ -34,6 +34,7 @@
 | `last_synced_at` | DATETIME | NULLABLE | 最后同步时间戳，首次克隆前为 NULL |
 | `created_at` | DATETIME | NOT NULL | 记录创建时间，自动填充 |
 | `updated_at` | DATETIME | NOT NULL | 记录最后更新时间，写入时自动更新 |
+| `is_public` | BOOLEAN | NOT NULL, DEFAULT false | 是否公开展示，允许未认证用户查看该仓库的 Wiki（迁移 007 新增） |
 
 **状态机流转**:
 ```
