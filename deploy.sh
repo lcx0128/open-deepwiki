@@ -19,13 +19,15 @@ COMPOSE_CMD="docker compose"
 ALL_SERVICES=(api worker mcp frontend)
 NO_CACHE=""
 FORCE_SERVICES=()
+FORCE_ALL=false
 
 # ─── 参数解析 ──────────────────────────────────────────────
 for arg in "$@"; do
   case "$arg" in
     --no-cache) NO_CACHE="--no-cache" ;;
+    --force)    FORCE_ALL=true ;;
     api|worker|mcp|frontend) FORCE_SERVICES+=("$arg") ;;
-    *) echo "未知参数: $arg  （可选值：--no-cache api worker mcp frontend）"; exit 1 ;;
+    *) echo "未知参数: $arg  （可选值：--no-cache --force api worker mcp frontend）"; exit 1 ;;
   esac
 done
 
@@ -57,6 +59,9 @@ echo "==> [2/5] 分析变更范围"
 if [ ${#FORCE_SERVICES[@]} -gt 0 ]; then
   BUILD_SERVICES=("${FORCE_SERVICES[@]}")
   echo "    指定重建：${BUILD_SERVICES[*]}"
+elif [ "$FORCE_ALL" = true ]; then
+  BUILD_SERVICES=("${ALL_SERVICES[@]}")
+  echo "    --force 全量重建：${BUILD_SERVICES[*]}"
 else
   CHANGED=$(git diff HEAD~1 HEAD --name-only 2>/dev/null || echo "")
   BUILD_SERVICES=()
