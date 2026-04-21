@@ -120,3 +120,5 @@ doc/dev-context/
 # --- MCP & Claude Code local config (contains personal paths, never commit) ---
 .mcp.json
 .claude/
+AGENTS.md
+output/
