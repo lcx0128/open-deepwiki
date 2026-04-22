@@ -4,15 +4,24 @@ retrieval_planner.py — 检索规划智能体
 对宽泛查询（"所有 prompt"、"列举所有文件"、"翻译全部"等）使用轻量 LLM
 基于代码库索引识别目标文件，实现精准的全局检索。
 """
+from dataclasses import dataclass
 import json
 import logging
 import re
-from typing import Optional
+from typing import List, Optional
 
 from app.services.llm.factory import create_adapter
 from app.schemas.llm import LLMMessage
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PlannedTarget:
+    """检索规划目标：文件路径 + 可选的 symbol 名称"""
+
+    file_path: str
+    symbol_name: Optional[str] = None
 
 # 触发规划的宽泛查询关键词（中英文）
 _BROAD_PATTERNS = [
@@ -24,17 +33,21 @@ _BROAD_PATTERNS = [
 
 PLANNER_PROMPT = """\
 You are a code retrieval expert. Given a codebase index and a user question, \
-identify which specific files are most likely to contain the answer.
+identify which specific files and symbols are most likely to contain the answer.
 
 CODEBASE INDEX:
 {codebase_index}
 
 USER QUESTION: {question}
 
-Return ONLY a JSON array of file paths (relative paths as shown in the index) \
-that are most relevant. Return at most 5 paths. Return [] if no files are clearly relevant.
+Return ONLY a JSON array of objects with "file" (required) and "symbol" (optional) fields. \
+"symbol" should be the most relevant function, class, or constant name in that file. \
+Return at most 5 items. Return [] if no files are clearly relevant.
 
-Example: ["app/services/chat_service.py", "app/services/wiki_generator.py"]
+Example: [
+  {{"file": "app/services/chat_service.py", "symbol": "handle_chat_stream"}},
+  {{"file": "app/services/wiki_generator.py", "symbol": null}}
+]
 
 Response (JSON array only, no explanation):"""
 
@@ -52,10 +65,10 @@ async def plan_retrieval(
     codebase_index_text: str,
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
-) -> list:
+) -> List[PlannedTarget]:
     """
     使用 LLM 规划检索目标文件。
-    返回文件路径列表（相对路径）。失败时返回空列表，不影响主流程。
+    返回文件路径 + symbol 列表。失败时返回空列表，不影响主流程。
     """
     try:
         adapter = create_adapter(llm_provider)
@@ -77,9 +90,20 @@ async def plan_retrieval(
         # 提取 JSON 数组（容错：content 可能包含多余文字）
         match = re.search(r'\[.*?\]', content, re.DOTALL)
         if match:
-            file_paths = json.loads(match.group())
-            if isinstance(file_paths, list):
-                return [fp for fp in file_paths if isinstance(fp, str)][:5]
+            parsed = json.loads(match.group())
+            if isinstance(parsed, list):
+                targets: List[PlannedTarget] = []
+                for item in parsed[:5]:
+                    if isinstance(item, str):
+                        targets.append(PlannedTarget(file_path=item))
+                    elif isinstance(item, dict) and isinstance(item.get("file"), str):
+                        targets.append(
+                            PlannedTarget(
+                                file_path=item["file"],
+                                symbol_name=item.get("symbol"),
+                            )
+                        )
+                return targets
     except Exception as e:
         logger.warning(f"[RetrievalPlanner] 规划调用失败，跳过: {e}")
     return []

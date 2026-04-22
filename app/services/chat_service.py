@@ -6,10 +6,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.query_fusion import fuse_query
-from app.services.two_stage_retriever import stage1_discovery, stage2_assembly, read_file_context, stage2_gap_fill_constants
+from app.services.two_stage_retriever import (
+    read_targeted_context,
+    stage1_discovery,
+    stage2_assembly,
+    stage2_gap_fill_constants,
+)
 from app.services.conversation_memory import create_session, get_history, append_turn, session_exists
 from app.services.retrieval_planner import is_broad_query, plan_retrieval
-from app.services.token_budget import apply_token_budget, estimate_tokens
+from app.services.token_budget import (
+    apply_token_budget,
+    estimate_tokens,
+    trim_chunks_to_budget,
+    MODEL_LIMITS,
+    BUDGET_RATIO,
+    CONTEXT_BUDGET_RATIO,
+)
 from app.services.llm.factory import create_adapter
 from app.schemas.llm import LLMMessage
 from app.schemas.mcp_types import CodeGuideline
@@ -140,6 +152,15 @@ async def _get_codebase_index_text(db: AsyncSession, repo_id: str) -> Optional[s
     return None
 
 
+def _compute_context_budget(model: str, system_prompt: str, user_query: str) -> int:
+    """计算 RAG 上下文可用的 token 预算。"""
+    limit = MODEL_LIMITS.get(model, 32000)
+    budget = int(limit * BUDGET_RATIO)
+    fixed_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_query) + 100
+    remaining = budget - fixed_tokens
+    return int(max(remaining, 0) * CONTEXT_BUDGET_RATIO)
+
+
 async def handle_chat(
     db: AsyncSession,
     repo_id: str,
@@ -182,12 +203,14 @@ async def handle_chat(
     # 4. Stage 2: 获取完整代码（选取前 10 个最相关的）
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
+    chunk_weights = [g.relevance_score for g in guidelines[:len(code_contents)]]
 
     # 4.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
     try:
         gap_contents = await stage2_gap_fill_constants(guidelines[:10], repo_id)
         if gap_contents:
             code_contents = gap_contents + code_contents
+            chunk_weights = [0.7] * len(gap_contents) + chunk_weights
             logger.info(f"[ChatService] Round 2 gap-fill: 补取 {len(gap_contents)} 个常量 chunk")
     except Exception as _gf:
         logger.debug(f"[ChatService] gap-fill failed (non-fatal): {_gf}")
@@ -199,16 +222,24 @@ async def handle_chat(
     if codebase_index_text:
         system_prompt += f"\n\n{codebase_index_text}"
 
-    # 检索规划：对宽泛查询，使用 LLM 识别目标文件并直接读取
+    # 检索规划：对宽泛查询，使用 LLM 识别目标文件并定点读取
     if codebase_index_text and is_broad_query(fused_query):
-        planned_files = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
-        for planned_fp in planned_files[:3]:  # 最多 3 个文件，控制 token
+        planned_targets = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
+        for target in planned_targets[:3]:  # 最多 3 个文件，控制 token
             try:
-                fc = read_file_context(repo_id, planned_fp, 1, 300)  # 前 300 行
-                code_contents.insert(0, f"// [TARGETED FILE] {planned_fp}\n{fc.content}")
-                logger.info(f"[ChatService] 规划检索追加文件: {planned_fp}")
+                content = await read_targeted_context(repo_id, target)
+                if content:
+                    code_contents.insert(0, content)
+                    chunk_weights.insert(0, 0.5)
+                    logger.info(
+                        f"[ChatService] 规划检索追加: {target.file_path} "
+                        f"(symbol={target.symbol_name})"
+                    )
             except Exception as _fe:
-                logger.debug(f"[ChatService] 规划文件读取失败 {planned_fp}: {_fe}")
+                logger.debug(f"[ChatService] 规划文件读取失败 {target.file_path}: {_fe}")
+
+    context_budget = _compute_context_budget(model, system_prompt, query)
+    code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
 
     rag_context = "\n\n---\n\n".join(code_contents)
     trimmed_history, trimmed_context = apply_token_budget(
@@ -316,12 +347,14 @@ async def handle_chat_stream(
     guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
+    chunk_weights = [g.relevance_score for g in guidelines[:len(code_contents)]]
 
     # 3.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
     try:
         gap_contents = await stage2_gap_fill_constants(guidelines[:10], repo_id)
         if gap_contents:
             code_contents = gap_contents + code_contents
+            chunk_weights = [0.7] * len(gap_contents) + chunk_weights
             logger.info(f"[ChatService] Round 2 gap-fill: 补取 {len(gap_contents)} 个常量 chunk")
     except Exception as _gf:
         logger.debug(f"[ChatService] gap-fill failed (non-fatal): {_gf}")
@@ -333,16 +366,24 @@ async def handle_chat_stream(
     if codebase_index_text:
         system_prompt += f"\n\n{codebase_index_text}"
 
-    # 检索规划：对宽泛查询，使用 LLM 识别目标文件并直接读取
+    # 检索规划：对宽泛查询，使用 LLM 识别目标文件并定点读取
     if codebase_index_text and is_broad_query(fused_query):
-        planned_files = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
-        for planned_fp in planned_files[:3]:  # 最多 3 个文件，控制 token
+        planned_targets = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
+        for target in planned_targets[:3]:  # 最多 3 个文件，控制 token
             try:
-                fc = read_file_context(repo_id, planned_fp, 1, 300)  # 前 300 行
-                code_contents.insert(0, f"// [TARGETED FILE] {planned_fp}\n{fc.content}")
-                logger.info(f"[ChatService] 规划检索追加文件: {planned_fp}")
+                content = await read_targeted_context(repo_id, target)
+                if content:
+                    code_contents.insert(0, content)
+                    chunk_weights.insert(0, 0.5)
+                    logger.info(
+                        f"[ChatService] 规划检索追加: {target.file_path} "
+                        f"(symbol={target.symbol_name})"
+                    )
             except Exception as _fe:
-                logger.debug(f"[ChatService] 规划文件读取失败 {planned_fp}: {_fe}")
+                logger.debug(f"[ChatService] 规划文件读取失败 {target.file_path}: {_fe}")
+
+    context_budget = _compute_context_budget(model, system_prompt, query)
+    code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
 
     rag_context = "\n\n---\n\n".join(code_contents)
 
@@ -467,12 +508,14 @@ async def handle_deep_research_stream(
     guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
     top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
+    chunk_weights = [g.relevance_score for g in guidelines[:len(code_contents)]]
 
     # 5.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
     try:
         gap_contents = await stage2_gap_fill_constants(guidelines[:10], repo_id)
         if gap_contents:
             code_contents = gap_contents + code_contents
+            chunk_weights = [0.7] * len(gap_contents) + chunk_weights
             logger.info(f"[DeepResearch] Round 2 gap-fill: 补取 {len(gap_contents)} 个常量 chunk")
     except Exception as _gf:
         logger.debug(f"[DeepResearch] gap-fill failed (non-fatal): {_gf}")
@@ -483,18 +526,21 @@ async def handle_deep_research_stream(
     if codebase_index_text:
         system_prompt += f"\n\n{codebase_index_text}"
 
-    # 检索规划：第1轮或宽泛查询时，使用 LLM 识别目标文件并直接读取
+    # 检索规划：第1轮或宽泛查询时，使用 LLM 识别目标文件并定点读取
     if codebase_index_text and (is_first or is_broad_query(fused_query)):
-        planned_files = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
-        for planned_fp in planned_files[:3]:  # 最多 3 个文件，控制 token
+        planned_targets = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
+        for target in planned_targets[:3]:  # 最多 3 个文件，控制 token
             try:
-                fc = read_file_context(repo_id, planned_fp, 1, 300)  # 前 300 行
-                code_contents.insert(0, f"// [TARGETED FILE] {planned_fp}\n{fc.content}")
-                logger.info(f"[DeepResearch] 规划检索追加文件: {planned_fp}")
+                content = await read_targeted_context(repo_id, target)
+                if content:
+                    code_contents.insert(0, content)
+                    chunk_weights.insert(0, 0.5)
+                    logger.info(
+                        f"[DeepResearch] 规划检索追加: {target.file_path} "
+                        f"(symbol={target.symbol_name})"
+                    )
             except Exception as _fe:
-                logger.debug(f"[DeepResearch] 规划文件读取失败 {planned_fp}: {_fe}")
-
-    rag_context = "\n\n---\n\n".join(code_contents)
+                logger.debug(f"[DeepResearch] 规划文件读取失败 {target.file_path}: {_fe}")
 
     # 7. 组装用户 prompt（当前轮的指令）
     if is_first:
@@ -505,6 +551,11 @@ async def handle_deep_research_stream(
         user_instruction = DEEP_RESEARCH_INTERMEDIATE_PROMPT.format(
             iteration=iteration, question=query
         )
+
+    context_budget = _compute_context_budget(model, system_prompt, user_instruction)
+    code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
+
+    rag_context = "\n\n---\n\n".join(code_contents)
 
     # 8. Token 预算管理 + 组装完整消息列表
     history_msgs = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")]

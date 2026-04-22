@@ -1,5 +1,5 @@
 # app/services/token_budget.py
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 # 近似 Token 计算：英文 ~4 字符/token，中文 ~2 字符/token
 def estimate_tokens(text: str) -> int:
@@ -24,6 +24,7 @@ MODEL_LIMITS = {
 }
 
 BUDGET_RATIO = 0.80  # 使用模型限制的 80% 作为预算
+CONTEXT_BUDGET_RATIO = 0.6  # 剩余预算中分配给 RAG 上下文的比例
 
 
 def apply_token_budget(
@@ -54,15 +55,16 @@ def apply_token_budget(
         return [], ""
 
     # 先分配给 RAG 上下文（最多用 60% 剩余预算）
-    context_budget = int(remaining * 0.6)
+    context_budget = int(remaining * CONTEXT_BUDGET_RATIO)
     history_budget = remaining - context_budget
 
-    # 裁剪 RAG 上下文
+    # 裁剪 RAG 上下文（保持完整性，不做字符截断）
+    # chunk-aware 裁剪已在调用方完成；此处仅做最终安全检查
     context_tokens = estimate_tokens(rag_context)
     if context_tokens > context_budget:
-        # 按字符比例截断
-        ratio = context_budget / context_tokens
-        rag_context = rag_context[:int(len(rag_context) * ratio)]
+        chunks = rag_context.split("\n\n---\n\n")
+        trimmed = trim_chunks_to_budget(chunks, context_budget)
+        rag_context = "\n\n---\n\n".join(trimmed)
 
     # 裁剪对话历史（从最旧的开始删除）
     trimmed_messages = []
@@ -76,3 +78,39 @@ def apply_token_budget(
             break  # 超出预算，停止添加更旧的消息
 
     return trimmed_messages, rag_context
+
+
+def trim_chunks_to_budget(
+    chunks: List[str],
+    budget_tokens: int,
+    weights: Optional[List[float]] = None,
+) -> List[str]:
+    """
+    以 chunk 为最小裁剪单位，按证据权重整块丢弃，直到总 token 数 <= budget_tokens。
+
+    返回的 chunk 保持原始顺序；当预算极小或无法精确满足预算时，也至少保留 1 条。
+    """
+    if not chunks:
+        return []
+
+    chunk_info = []
+    for i, chunk in enumerate(chunks):
+        tokens = estimate_tokens(chunk)
+        weight = weights[i] if weights and i < len(weights) else 0.5
+        chunk_info.append((i, chunk, tokens, weight))
+
+    total_tokens = sum(info[2] for info in chunk_info)
+    if total_tokens <= budget_tokens:
+        return list(chunks)
+
+    drop_order = sorted(chunk_info, key=lambda x: (x[3], -x[0]))
+
+    kept_indices = {info[0] for info in chunk_info}
+    running_tokens = total_tokens
+    for i, chunk, tokens, weight in drop_order:
+        if running_tokens <= budget_tokens or len(kept_indices) == 1:
+            break
+        kept_indices.remove(i)
+        running_tokens -= tokens
+
+    return [chunks[i] for i in sorted(kept_indices)]

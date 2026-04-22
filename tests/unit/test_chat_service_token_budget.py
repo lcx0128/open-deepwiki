@@ -1,0 +1,167 @@
+from contextlib import ExitStack
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.schemas.mcp_types import CodeGuideline
+from app.services import chat_service
+from app.services.retrieval_planner import PlannedTarget
+
+
+def _build_guidelines():
+    return [
+        CodeGuideline(
+            chunk_id="chunk-high",
+            name="high",
+            file_path="app/high.py",
+            node_type="function",
+            start_line=1,
+            end_line=10,
+            description="high relevance",
+            relevance_score=0.9,
+        ),
+        CodeGuideline(
+            chunk_id="chunk-low",
+            name="low",
+            file_path="app/low.py",
+            node_type="function",
+            start_line=20,
+            end_line=30,
+            description="low relevance",
+            relevance_score=0.4,
+        ),
+    ]
+
+
+def _build_adapter():
+    adapter = MagicMock()
+    adapter.generate_with_rate_limit = AsyncMock(
+        return_value=SimpleNamespace(content="final answer", usage={})
+    )
+
+    async def fake_stream_with_rate_limit(*args, **kwargs):
+        for token in ("part-1", "part-2"):
+            yield token
+
+    adapter.stream_with_rate_limit = fake_stream_with_rate_limit
+    return adapter
+
+
+def _capture_budget_calls():
+    captured = {}
+
+    def fake_trim_chunks_to_budget(chunks, budget_tokens, weights=None):
+        captured["chunks"] = list(chunks)
+        captured["budget_tokens"] = budget_tokens
+        captured["weights"] = list(weights or [])
+        return ["trimmed-1", "trimmed-2"]
+
+    def fake_apply_token_budget(messages, model, system_prompt, rag_context, user_query):
+        captured["rag_context"] = rag_context
+        captured["apply_user_query"] = user_query
+        return [], rag_context
+
+    def fake_compute_context_budget(model, system_prompt, user_query):
+        captured["budget_user_query"] = user_query
+        return 123
+
+    return captured, fake_trim_chunks_to_budget, fake_apply_token_budget, fake_compute_context_budget
+
+
+def _patch_common_dependencies(stack: ExitStack, captured: dict):
+    adapter = _build_adapter()
+    stack.enter_context(patch("app.services.chat_service.create_adapter", return_value=adapter))
+    stack.enter_context(patch("app.services.chat_service.create_session", AsyncMock(return_value="session-1")))
+    stack.enter_context(patch("app.services.chat_service.session_exists", AsyncMock(return_value=True)))
+    stack.enter_context(patch("app.services.chat_service.get_history", AsyncMock(return_value=[])))
+    stack.enter_context(patch("app.services.chat_service.append_turn", AsyncMock()))
+    stack.enter_context(patch("app.services.chat_service.fuse_query", AsyncMock(return_value="fused query")))
+    stack.enter_context(patch("app.services.chat_service.stage1_discovery", AsyncMock(return_value=_build_guidelines())))
+    stack.enter_context(patch("app.services.chat_service.stage2_assembly", AsyncMock(return_value=["base-high", "base-low"])))
+    stack.enter_context(patch("app.services.chat_service.stage2_gap_fill_constants", AsyncMock(return_value=["gap-content"])))
+    stack.enter_context(patch("app.services.chat_service._get_repo_name", AsyncMock(return_value="repo-name")))
+    stack.enter_context(patch("app.services.chat_service._get_codebase_index_text", AsyncMock(return_value="index text")))
+    stack.enter_context(patch("app.services.chat_service.is_broad_query", return_value=True))
+    stack.enter_context(
+        patch(
+            "app.services.chat_service.plan_retrieval",
+            AsyncMock(return_value=[PlannedTarget(file_path="planned.py", symbol_name="target_symbol")]),
+        )
+    )
+    stack.enter_context(patch("app.services.chat_service.read_targeted_context", AsyncMock(return_value="planned-content")))
+
+    trim_mock = stack.enter_context(
+        patch("app.services.chat_service.trim_chunks_to_budget", side_effect=captured["trim"])
+    )
+    apply_mock = stack.enter_context(
+        patch("app.services.chat_service.apply_token_budget", side_effect=captured["apply"])
+    )
+    compute_mock = stack.enter_context(
+        patch("app.services.chat_service._compute_context_budget", side_effect=captured["compute"])
+    )
+    return adapter, trim_mock, apply_mock, compute_mock
+
+
+@pytest.mark.asyncio
+async def test_handle_chat_trims_chunks_before_join_with_aligned_weights():
+    captured, trim_fn, apply_fn, compute_fn = _capture_budget_calls()
+    helpers = {"trim": trim_fn, "apply": apply_fn, "compute": compute_fn}
+
+    with ExitStack() as stack:
+        _patch_common_dependencies(stack, helpers)
+        result = await chat_service.handle_chat(MagicMock(), "repo-1", "user query")
+
+    assert captured["chunks"] == ["planned-content", "gap-content", "base-high", "base-low"]
+    assert captured["weights"] == [0.5, 0.7, 0.9, 0.4]
+    assert captured["budget_tokens"] == 123
+    assert captured["budget_user_query"] == "user query"
+    assert captured["rag_context"] == "trimmed-1\n\n---\n\ntrimmed-2"
+    assert result["answer"] == "final answer"
+
+
+@pytest.mark.asyncio
+async def test_handle_chat_stream_trims_chunks_before_join_with_aligned_weights():
+    captured, trim_fn, apply_fn, compute_fn = _capture_budget_calls()
+    helpers = {"trim": trim_fn, "apply": apply_fn, "compute": compute_fn}
+
+    with ExitStack() as stack:
+        _patch_common_dependencies(stack, helpers)
+        events = [
+            event
+            async for event in chat_service.handle_chat_stream(
+                MagicMock(), "repo-1", "user query"
+            )
+        ]
+
+    assert captured["chunks"] == ["planned-content", "gap-content", "base-high", "base-low"]
+    assert captured["weights"] == [0.5, 0.7, 0.9, 0.4]
+    assert captured["budget_tokens"] == 123
+    assert captured["budget_user_query"] == "user query"
+    assert captured["rag_context"] == "trimmed-1\n\n---\n\ntrimmed-2"
+    assert events[-1] == {"type": "done"}
+
+
+@pytest.mark.asyncio
+async def test_handle_deep_research_stream_trims_chunks_before_join_with_aligned_weights():
+    captured, trim_fn, apply_fn, compute_fn = _capture_budget_calls()
+    helpers = {"trim": trim_fn, "apply": apply_fn, "compute": compute_fn}
+
+    with ExitStack() as stack:
+        _patch_common_dependencies(stack, helpers)
+        events = [
+            event
+            async for event in chat_service.handle_deep_research_stream(
+                MagicMock(),
+                "repo-1",
+                "user query",
+                [{"role": "user", "content": "user query"}],
+            )
+        ]
+
+    assert captured["chunks"] == ["planned-content", "gap-content", "base-high", "base-low"]
+    assert captured["weights"] == [0.5, 0.7, 0.9, 0.4]
+    assert captured["budget_tokens"] == 123
+    assert "Research Plan" in captured["budget_user_query"]
+    assert captured["rag_context"] == "trimmed-1\n\n---\n\ntrimmed-2"
+    assert events[-1] == {"type": "done"}

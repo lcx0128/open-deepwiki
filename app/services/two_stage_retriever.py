@@ -273,6 +273,61 @@ def read_file_context(
     )
 
 
+async def read_targeted_context(
+    repo_id: str,
+    target,
+) -> str:
+    """
+    基于 PlannedTarget 做定点读取。
+
+    有 symbol 时优先根据 ChromaDB 中的行号元数据做窗口读取；
+    无 symbol 或查询失败时退回文件前 300 行。
+    """
+    file_path = target.file_path
+    symbol_name = getattr(target, "symbol_name", None)
+
+    if symbol_name:
+        try:
+            collection = get_collection(repo_id)
+            symbol_results = collection.get(
+                where={"name": symbol_name, "file_path": file_path},
+                include=["metadatas"],
+                limit=5,
+            )
+
+            metadatas = symbol_results.get("metadatas") or []
+            ids = symbol_results.get("ids") or []
+            if ids and metadatas:
+                metadata = metadatas[0]
+                if len(ids) > 1:
+                    for candidate in metadatas:
+                        if candidate.get("parent_name"):
+                            metadata = candidate
+                            break
+
+                start_line = int(metadata.get("start_line", 0))
+                end_line = int(metadata.get("end_line", 0))
+
+                if start_line > 0 and end_line > 0:
+                    window_start = max(1, start_line - 10)
+                    window_end = end_line + 30
+                    file_context = read_file_context(repo_id, file_path, window_start, window_end)
+                    label = (
+                        f"// [TARGETED FILE] {file_path} "
+                        f"({symbol_name}, Lines {window_start}-{window_end})"
+                    )
+                    return f"{label}\n{file_context.content}"
+        except Exception as exc:
+            logger.debug(f"[TargetedRead] symbol lookup failed for {symbol_name}@{file_path}: {exc}")
+
+    try:
+        file_context = read_file_context(repo_id, file_path, 1, 300)
+        return f"// [TARGETED FILE] {file_path}\n{file_context.content}"
+    except Exception as exc:
+        logger.debug(f"[TargetedRead] file read failed for {file_path}: {exc}")
+        return ""
+
+
 async def stage2_gap_fill_constants(
     retrieved_guidelines: List[CodeGuideline],
     repo_id: str,
