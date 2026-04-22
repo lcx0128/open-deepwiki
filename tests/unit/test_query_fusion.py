@@ -214,3 +214,85 @@ class TestFuseQueryHistoryTruncation:
 
         assert result == "rewritten"
         mock_adapter.generate_with_rate_limit.assert_called_once()
+
+
+class TestFuseQueryProperNounResolution:
+    """
+    These tests validate prompt construction for follow-up questions.
+
+    The goal is to confirm that prior technical identifiers remain present
+    in the rewritten-query prompt, not to judge LLM output quality itself.
+    """
+
+    @pytest.mark.asyncio
+    async def test_pronoun_resolution_prompt_includes_prior_subject(self):
+        """A prior symbol name should be included when the follow-up uses a pronoun."""
+        mock_response = MagicMock()
+        mock_response.content = "How parse_repository works"
+
+        mock_adapter = MagicMock()
+        mock_adapter.generate_with_rate_limit = AsyncMock(return_value=mock_response)
+
+        history = [
+            {"role": "user", "content": "What does parse_repository do?"},
+            {"role": "assistant", "content": "parse_repository parses the repository."},
+        ]
+
+        with patch("app.services.query_fusion.create_adapter", return_value=mock_adapter):
+            result = await fuse_query("How does it work?", history)
+
+        assert result == "How parse_repository works"
+        mock_adapter.generate_with_rate_limit.assert_called_once()
+
+        call_args = mock_adapter.generate_with_rate_limit.call_args
+        messages_sent = call_args.kwargs.get("messages", call_args.args[0] if call_args.args else [])
+        prompt_content = messages_sent[0].content
+
+        assert "parse_repository" in prompt_content
+        assert "How does it work?" in prompt_content
+
+    @pytest.mark.asyncio
+    async def test_technical_term_preserved_in_prompt(self):
+        """CamelCase and snake_case identifiers should stay intact in the prompt."""
+        mock_response = MagicMock()
+        mock_response.content = "stage1_discovery parameters in ChromaDB"
+
+        mock_adapter = MagicMock()
+        mock_adapter.generate_with_rate_limit = AsyncMock(return_value=mock_response)
+
+        history = [
+            {"role": "user", "content": "How does stage1_discovery search in ChromaDB?"},
+            {"role": "assistant", "content": "stage1_discovery combines vector and keyword retrieval."},
+        ]
+
+        with patch("app.services.query_fusion.create_adapter", return_value=mock_adapter):
+            await fuse_query("Which parameters does it use?", history)
+
+        call_args = mock_adapter.generate_with_rate_limit.call_args
+        messages_sent = call_args.kwargs.get("messages", call_args.args[0] if call_args.args else [])
+        prompt_content = messages_sent[0].content
+
+        assert "stage1_discovery" in prompt_content
+        assert "ChromaDB" in prompt_content
+        assert "Which parameters does it use?" in prompt_content
+
+    @pytest.mark.asyncio
+    async def test_fused_query_returned_not_original(self):
+        """A meaningful rewrite should be returned instead of the original follow-up."""
+        mock_response = MagicMock()
+        mock_response.content = "What parameters does handle_chat_stream accept?"
+
+        mock_adapter = MagicMock()
+        mock_adapter.generate_with_rate_limit = AsyncMock(return_value=mock_response)
+
+        history = [
+            {"role": "user", "content": "How is handle_chat_stream implemented?"},
+            {"role": "assistant", "content": "It is the main streaming chat function."},
+        ]
+
+        with patch("app.services.query_fusion.create_adapter", return_value=mock_adapter):
+            result = await fuse_query("What parameters does it have?", history)
+
+        assert result != "What parameters does it have?"
+        assert result == "What parameters does handle_chat_stream accept?"
+        assert "handle_chat_stream" in result

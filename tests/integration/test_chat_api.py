@@ -12,13 +12,15 @@ and app.services.chat_service.handle_chat_stream.
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
+from app.schemas.mcp_types import CodeGuideline
+
 # ---------------------------------------------------------------------------
 # Lazy import guard: only import app.main inside tests so that missing .env
 # or Redis config does not break the collection phase.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_post_chat_returns_200_with_valid_payload():
     """
     POST /api/chat with a valid body and mocked chat_service returns HTTP 200
@@ -69,7 +71,7 @@ def test_post_chat_returns_200_with_valid_payload():
     assert isinstance(data["chunk_refs"], list)
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_post_chat_with_existing_session_id():
     """
     POST /api/chat with an existing session_id continues the conversation.
@@ -104,7 +106,7 @@ def test_post_chat_with_existing_session_id():
     assert response.json()["session_id"] == existing_session
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_post_chat_missing_repo_id_returns_422():
     """
     POST /api/chat without the required repo_id field returns HTTP 422
@@ -130,7 +132,7 @@ def test_post_chat_missing_repo_id_returns_422():
     assert "repo_id" in field_names
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_post_chat_missing_query_returns_422():
     """
     POST /api/chat without the required query field returns HTTP 422.
@@ -147,7 +149,7 @@ def test_post_chat_missing_query_returns_422():
     assert response.status_code == 422
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_post_chat_empty_body_returns_422():
     """
     POST /api/chat with an empty JSON body returns HTTP 422.
@@ -161,7 +163,7 @@ def test_post_chat_empty_body_returns_422():
     assert response.status_code == 422
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_get_chat_stream_returns_event_stream_content_type():
     """
     GET /api/chat/stream with valid query params returns:
@@ -193,7 +195,7 @@ def test_get_chat_stream_returns_event_stream_content_type():
     assert "text/event-stream" in response.headers.get("content-type", "")
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_get_chat_stream_missing_repo_id_returns_422():
     """
     GET /api/chat/stream without the required repo_id query parameter
@@ -211,7 +213,7 @@ def test_get_chat_stream_missing_repo_id_returns_422():
     assert response.status_code == 422
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_get_chat_stream_missing_query_returns_422():
     """
     GET /api/chat/stream without the required query parameter returns HTTP 422.
@@ -228,7 +230,7 @@ def test_get_chat_stream_missing_query_returns_422():
     assert response.status_code == 422
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_post_chat_service_404_returns_http_404():
     """
     When handle_chat raises FileNotFoundError (e.g. repo not in vector store),
@@ -253,7 +255,7 @@ def test_post_chat_service_404_returns_http_404():
     assert response.status_code == 404
 
 
-@pytest.mark.skip(reason="requires running services")
+@pytest.mark.skip(reason="requires mock infra - see Plan 00 notes")
 def test_post_chat_service_value_error_returns_http_400():
     """
     When handle_chat raises ValueError (e.g. invalid session_id),
@@ -277,3 +279,81 @@ def test_post_chat_service_value_error_returns_http_400():
             )
 
     assert response.status_code == 400
+
+
+class TestSSEEventOrder:
+    """Directly exercise handle_chat_stream without TestClient or app lifespan."""
+
+    @staticmethod
+    async def _collect_stream_events():
+        from app.services.chat_service import handle_chat_stream
+
+        mock_db = AsyncMock()
+        guidelines = [
+            CodeGuideline(
+                chunk_id="chunk-1",
+                name="parse_repository",
+                file_path="app/services/parser.py",
+                node_type="function",
+                start_line=10,
+                end_line=40,
+                description="Parse repository entry point",
+                relevance_score=0.98,
+            )
+        ]
+
+        async def fake_stream_with_rate_limit(**kwargs):
+            yield "Hello"
+            yield " World"
+
+        mock_adapter = MagicMock()
+        mock_adapter.stream_with_rate_limit = MagicMock(return_value=fake_stream_with_rate_limit())
+
+        with patch("app.services.chat_service.fuse_query", new=AsyncMock(return_value="fused query")), \
+             patch("app.services.chat_service.stage1_discovery", new=AsyncMock(return_value=guidelines)), \
+             patch("app.services.chat_service.stage2_assembly", new=AsyncMock(return_value=["chunk_1"])), \
+             patch("app.services.chat_service.stage2_gap_fill_constants", new=AsyncMock(return_value=[])), \
+             patch("app.services.chat_service._get_codebase_index_text", new=AsyncMock(return_value=None)), \
+             patch("app.services.chat_service._get_repo_name", new=AsyncMock(return_value="test-repo")), \
+             patch("app.services.chat_service.create_session", new=AsyncMock(return_value="test-session-id")), \
+             patch("app.services.chat_service.session_exists", new=AsyncMock(return_value=True)), \
+             patch("app.services.chat_service.get_history", new=AsyncMock(return_value=[])), \
+             patch("app.services.chat_service.append_turn", new=AsyncMock()), \
+             patch("app.services.chat_service.is_broad_query", return_value=False), \
+             patch("app.services.chat_service.create_adapter", return_value=mock_adapter):
+            events = []
+            async for event in handle_chat_stream(
+                db=mock_db,
+                repo_id="test-repo-id",
+                query="test query",
+                session_id=None,
+                llm_model="gpt-4o-mini",
+            ):
+                events.append(event)
+
+        return events
+
+    @pytest.mark.asyncio
+    async def test_sse_event_order_session_id_first_done_last(self):
+        """The baseline stream contract is session_id -> token(s) -> chunk_refs -> done."""
+        events = await self._collect_stream_events()
+        event_types = [event["type"] for event in events]
+
+        assert event_types == ["session_id", "token", "token", "chunk_refs", "done"]
+
+    @pytest.mark.asyncio
+    async def test_sse_token_events_between_session_and_done(self):
+        """All token events must be emitted before chunk_refs and done."""
+        events = await self._collect_stream_events()
+        event_types = [event["type"] for event in events]
+
+        session_idx = event_types.index("session_id")
+        done_idx = event_types.index("done")
+        chunk_refs_idx = event_types.index("chunk_refs")
+        token_indices = [idx for idx, event_type in enumerate(event_types) if event_type == "token"]
+
+        assert token_indices
+        assert session_idx == 0
+        assert all(session_idx < idx < done_idx for idx in token_indices)
+        assert max(token_indices) < chunk_refs_idx
+        assert session_idx < chunk_refs_idx < done_idx

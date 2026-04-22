@@ -166,3 +166,52 @@ class TestApplyTokenBudget:
             roles = [m["role"] for m in trimmed]
             # Roles should alternate user/assistant in original order
             assert roles == [m["role"] for m in messages[-len(trimmed):]]
+
+
+class TestTokenBudgetChunkBoundary:
+    """
+    Baseline snapshot of the current implementation.
+
+    Plan 01 will change this behavior from character truncation to
+    chunk-aware trimming, so these assertions intentionally lock in the
+    pre-refactor behavior as a regression detector.
+    """
+
+    def test_current_truncation_cuts_mid_chunk(self):
+        """
+        Current behavior truncates by character ratio, which can split a chunk.
+
+        Plan 01 should replace this with whole-chunk trimming, so this test
+        will need to be updated once that refactor lands.
+        """
+        chunk_a = "// File: a.py\n" + ("a" * 20000)
+        chunk_b = "// File: b.py\n" + ("b" * 20000)
+        chunk_c = "// File: c.py\n" + ("c" * 20000)
+        rag_context = "\n\n---\n\n".join([chunk_a, chunk_b, chunk_c])
+
+        _, trimmed_ctx = apply_token_budget(
+            [],
+            "gpt-3.5-turbo",
+            "system prompt " * 100,
+            rag_context,
+            "user query",
+        )
+
+        assert len(trimmed_ctx) < len(rag_context)
+        assert trimmed_ctx.startswith(chunk_a)
+        assert chunk_b[:500] in trimmed_ctx
+        assert chunk_b not in trimmed_ctx
+        assert chunk_c not in trimmed_ctx
+
+    def test_multiple_chunks_format_preserved(self):
+        """
+        The current multi-chunk separator is the parsing contract for Plan 01.
+        """
+        chunks = ["chunk_1_content", "chunk_2_content", "chunk_3_content"]
+        joined = "\n\n---\n\n".join(chunks)
+
+        parts = joined.split("\n\n---\n\n")
+
+        assert len(parts) == 3
+        assert parts[0] == "chunk_1_content"
+        assert parts[2] == "chunk_3_content"
