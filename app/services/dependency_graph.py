@@ -1,5 +1,10 @@
-from typing import List, Dict, Set
+import logging
+from typing import Dict, List, Optional, Set
+
 from app.schemas.chunk_node import ChunkNode
+from app.services.embedder import get_collection
+
+logger = logging.getLogger(__name__)
 
 
 def build_dependency_graph(chunks: List[ChunkNode]) -> dict:
@@ -142,3 +147,107 @@ def get_file_summary(chunks: List[ChunkNode]) -> dict:
                     file_summary[fp]["orm_models"].append(chunk.name)
 
     return file_summary
+
+
+async def get_callees(
+    repo_id: str,
+    symbol_name: str,
+    file_path: Optional[str] = None,
+) -> List[str]:
+    """
+    查询指定 symbol 调用的函数名列表（下游依赖）。
+
+    当前 ChromaDB metadata.calls 仅保存逗号分隔的函数名，因此必须提供
+    file_path 来定位 caller，避免同名函数导致跨文件误匹配。
+    """
+    if not file_path:
+        return []
+
+    try:
+        collection = get_collection(repo_id)
+        results = collection.get(
+            where={"name": symbol_name, "file_path": file_path},
+            include=["metadatas"],
+            limit=1,
+        )
+
+        metadatas = results.get("metadatas") or []
+        if not results.get("ids") or not metadatas:
+            return []
+
+        calls_str = metadatas[0].get("calls", "")
+        if not calls_str:
+            return []
+
+        return [call.strip() for call in calls_str.split(",") if call.strip()]
+    except Exception as exc:
+        logger.debug(
+            "[DepGraph] get_callees failed for %s@%s: %s",
+            symbol_name,
+            file_path,
+            exc,
+        )
+
+    return []
+
+
+async def get_callers(
+    repo_id: str,
+    symbol_name: str,
+    file_path: Optional[str] = None,
+) -> List[str]:
+    """
+    查询调用指定 symbol 的函数名列表（上游调用方）。
+
+    由于 calls 字段不包含被调用函数路径，这里只能在目标 symbol 存在后扫描
+    全部 chunk 的 metadata，并按函数名做近似匹配。大仓库直接跳过以保护性能。
+    """
+    if not file_path:
+        return []
+
+    try:
+        collection = get_collection(repo_id)
+
+        target_check = collection.get(
+            where={"name": symbol_name, "file_path": file_path},
+            include=["metadatas"],
+            limit=1,
+        )
+        if not target_check.get("ids"):
+            return []
+
+        chunk_count = collection.count()
+        if chunk_count > 5000:
+            logger.warning(
+                "[DepGraph] get_callers skipped: repo %s has %s chunks (>5000)",
+                repo_id,
+                chunk_count,
+            )
+            return []
+
+        all_chunks = collection.get(include=["metadatas"])
+        callers: List[str] = []
+        seen = set()
+        for metadata in all_chunks.get("metadatas") or []:
+            calls = [call.strip() for call in metadata.get("calls", "").split(",")]
+            if symbol_name not in calls:
+                continue
+
+            caller_name = metadata.get("name", "")
+            if not caller_name or caller_name == symbol_name or caller_name in seen:
+                continue
+            callers.append(caller_name)
+            seen.add(caller_name)
+            if len(callers) >= 10:
+                break
+
+        return callers
+    except Exception as exc:
+        logger.debug(
+            "[DepGraph] get_callers failed for %s@%s: %s",
+            symbol_name,
+            file_path,
+            exc,
+        )
+
+    return []

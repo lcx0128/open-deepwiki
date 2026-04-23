@@ -206,3 +206,77 @@ async def test_apply_evidence_check_degrades_when_supplemental_retrieval_fails()
         )
 
     assert result == (guidelines, code_contents, chunk_weights)
+
+
+def test_infer_expansion_direction_prefers_caller_for_upstream_queries():
+    assert (
+        chat_service._infer_expansion_direction(["call_chain"], "stage1_discovery 谁调用")
+        == "caller"
+    )
+
+
+def test_infer_expansion_direction_defaults_to_callee_for_implementation_queries():
+    assert (
+        chat_service._infer_expansion_direction(["call_chain", "implementation"], "实现流程")
+        == "callee"
+    )
+
+
+@pytest.mark.asyncio
+async def test_supplemental_retrieval_runs_dependency_expansion_without_queries():
+    guidelines = _build_guidelines()
+    expanded = CodeGuideline(
+        chunk_id="dep-chunk",
+        name="stage2_assembly",
+        file_path="app/services/two_stage_retriever.py",
+        node_type="function_definition",
+        start_line=40,
+        end_line=80,
+        description="[dep-graph:callee] async def stage2_assembly",
+        relevance_score=0.65,
+        source="dep_graph",
+    )
+
+    with (
+        patch(
+            "app.services.two_stage_retriever.expand_via_dependency_graph",
+            AsyncMock(return_value=[expanded]),
+        ) as expand_mock,
+        patch("app.services.chat_service.stage2_assembly", AsyncMock(return_value=["dep content"])),
+    ):
+        result_guidelines, result_contents, result_weights = await chat_service._run_supplemental_retrieval(
+            missing_aspects=["call_chain"],
+            suggested_queries=[],
+            repo_id="repo-1",
+            existing_guidelines=guidelines,
+            existing_contents=["base-high", "base-low"],
+            existing_weights=[0.9, 0.4],
+            fused_query="完整调用链",
+        )
+
+    assert result_guidelines == guidelines + [expanded]
+    assert result_contents == ["base-high", "base-low", "dep content"]
+    assert result_weights == [0.9, 0.4, 0.65]
+    expand_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_supplemental_retrieval_passes_caller_direction_to_dependency_expansion():
+    with (
+        patch(
+            "app.services.two_stage_retriever.expand_via_dependency_graph",
+            AsyncMock(return_value=[]),
+        ) as expand_mock,
+        patch("app.services.chat_service.stage2_assembly", AsyncMock()),
+    ):
+        await chat_service._run_supplemental_retrieval(
+            missing_aspects=["call_chain"],
+            suggested_queries=[],
+            repo_id="repo-1",
+            existing_guidelines=_build_guidelines(),
+            existing_contents=["base-high", "base-low"],
+            existing_weights=[0.9, 0.4],
+            fused_query="high 被哪里调用",
+        )
+
+    assert expand_mock.await_args.kwargs["direction"] == "caller"

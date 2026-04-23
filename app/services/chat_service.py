@@ -228,11 +228,17 @@ async def _run_supplemental_retrieval(
     existing_weights: List[float],
     index_data: Optional[dict] = None,
     repo_dir: Optional[str] = None,
+    fused_query: str = "",
 ) -> tuple[List[CodeGuideline], List[str], List[float]]:
-    """Run one extra grep/path retrieval round when evidence is insufficient."""
+    """Run one supplemental retrieval round: grep/path search plus dependency expansion."""
+    from app.services.two_stage_retriever import (
+        expand_via_dependency_graph,
+        merge_retrieval_results,
+    )
 
-    del missing_aspects
-
+    updated_guidelines = list(existing_guidelines)
+    updated_contents = list(existing_contents)
+    updated_weights = list(existing_weights)
     normalized_queries = []
     seen = set()
     for query in suggested_queries[:5]:
@@ -242,66 +248,120 @@ async def _run_supplemental_retrieval(
         seen.add(query)
         normalized_queries.append(query)
 
-    if not normalized_queries:
-        return existing_guidelines, existing_contents, existing_weights
+    if normalized_queries:
+        async def _noop() -> List:
+            return []
 
-    from app.services.two_stage_retriever import merge_retrieval_results
+        grep_task = grep_codebase(repo_id, normalized_queries, repo_dir=repo_dir)
+        path_query = " ".join(normalized_queries)
+        path_task = search_file_paths(repo_id, path_query, index_data) if index_data else _noop()
 
-    async def _noop() -> List:
-        return []
+        grep_matches, path_files = await asyncio.gather(
+            grep_task,
+            path_task,
+            return_exceptions=True,
+        )
+        if isinstance(grep_matches, Exception):
+            logger.debug(f"[SupplementalRetrieval] grep failed: {grep_matches}")
+            grep_matches = []
+        if isinstance(path_files, Exception):
+            logger.debug(f"[SupplementalRetrieval] path search failed: {path_files}")
+            path_files = []
 
-    grep_task = grep_codebase(repo_id, normalized_queries, repo_dir=repo_dir)
-    path_query = " ".join(normalized_queries)
-    path_task = search_file_paths(repo_id, path_query, index_data) if index_data else _noop()
+        if grep_matches or path_files:
+            supplemental_guidelines = await merge_retrieval_results(
+                vector_guidelines=updated_guidelines,
+                path_files=path_files,
+                grep_matches=grep_matches,
+                repo_id=repo_id,
+            )
 
-    grep_matches, path_files = await asyncio.gather(
-        grep_task,
-        path_task,
-        return_exceptions=True,
-    )
-    if isinstance(grep_matches, Exception):
-        logger.debug(f"[SupplementalRetrieval] grep failed: {grep_matches}")
-        grep_matches = []
-    if isinstance(path_files, Exception):
-        logger.debug(f"[SupplementalRetrieval] path search failed: {path_files}")
-        path_files = []
+            existing_ids = {guideline.chunk_id for guideline in updated_guidelines}
+            new_guideline_by_id = {}
+            new_chunk_ids = []
+            for guideline in supplemental_guidelines:
+                if guideline.chunk_id in existing_ids or guideline.chunk_id in new_guideline_by_id:
+                    continue
+                new_guideline_by_id[guideline.chunk_id] = guideline
+                new_chunk_ids.append(guideline.chunk_id)
+                if len(new_chunk_ids) >= 5:
+                    break
 
-    if not grep_matches and not path_files:
-        return existing_guidelines, existing_contents, existing_weights
+            updated_guidelines = supplemental_guidelines
+            if new_chunk_ids:
+                new_contents = await stage2_assembly(new_chunk_ids, repo_id)
+                aligned_chunk_ids = new_chunk_ids[:len(new_contents)]
+                new_weights = [
+                    new_guideline_by_id[chunk_id].relevance_score
+                    for chunk_id in aligned_chunk_ids
+                ]
+                updated_contents = updated_contents + new_contents
+                updated_weights = updated_weights + new_weights
 
-    supplemental_guidelines = await merge_retrieval_results(
-        vector_guidelines=existing_guidelines,
-        path_files=path_files,
-        grep_matches=grep_matches,
-        repo_id=repo_id,
-    )
+    call_chain_aspects = {"call_chain", "implementation"}
+    if call_chain_aspects & set(missing_aspects):
+        direction = _infer_expansion_direction(missing_aspects, query=fused_query)
+        try:
+            expanded = await asyncio.wait_for(
+                expand_via_dependency_graph(
+                    updated_guidelines,
+                    repo_id,
+                    direction=direction,
+                    max_hops=1,
+                ),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[ChatService] 依赖图扩展超时 (5s)，跳过")
+            expanded = []
 
-    existing_ids = {guideline.chunk_id for guideline in existing_guidelines}
-    new_guideline_by_id = {}
-    new_chunk_ids = []
-    for guideline in supplemental_guidelines:
-        if guideline.chunk_id in existing_ids or guideline.chunk_id in new_guideline_by_id:
-            continue
-        new_guideline_by_id[guideline.chunk_id] = guideline
-        new_chunk_ids.append(guideline.chunk_id)
-        if len(new_chunk_ids) >= 5:
-            break
+        if expanded:
+            updated_guidelines = updated_guidelines + expanded
+            expanded_ids = [guideline.chunk_id for guideline in expanded]
+            expanded_contents = await stage2_assembly(expanded_ids, repo_id)
+            expanded_weights = [
+                guideline.relevance_score
+                for guideline in expanded[:len(expanded_contents)]
+            ]
+            updated_contents = updated_contents + expanded_contents
+            updated_weights = updated_weights + expanded_weights
+            logger.info(
+                "[ChatService] 依赖图扩展: direction=%s, new_chunks=%s",
+                direction,
+                len(expanded),
+            )
 
-    if not new_chunk_ids:
-        return supplemental_guidelines, existing_contents, existing_weights
+    return updated_guidelines, updated_contents, updated_weights
 
-    new_contents = await stage2_assembly(new_chunk_ids, repo_id)
-    aligned_chunk_ids = new_chunk_ids[:len(new_contents)]
-    new_weights = [
-        new_guideline_by_id[chunk_id].relevance_score
-        for chunk_id in aligned_chunk_ids
+
+def _infer_expansion_direction(missing_aspects: List[str], query: str = "") -> str:
+    """
+    根据缺失方面和查询内容推断依赖图扩展方向。
+
+    caller 表示追上游调用方；callee 表示追下游实现，且作为默认方向。
+    """
+    import re
+
+    caller_patterns = [
+        r"谁调用",
+        r"被.*调用",
+        r"哪里.*触发",
+        r"来源",
+        r"哪里用到",
+        r"被.*引用",
+        r"上游",
+        r"who.*call",
+        r"called.*by",
+        r"triggered.*by",
+        r"used.*by",
     ]
+    if any(re.search(pattern, query, re.IGNORECASE) for pattern in caller_patterns):
+        return "caller"
 
-    return (
-        supplemental_guidelines,
-        existing_contents + new_contents,
-        existing_weights + new_weights,
-    )
+    if "implementation" in missing_aspects:
+        return "callee"
+
+    return "callee"
 
 
 async def _apply_evidence_check(
@@ -339,6 +399,7 @@ async def _apply_evidence_check(
                 chunk_weights,
                 index_data=index_data,
                 repo_dir=repo_dir,
+                fused_query=query,
             ),
             timeout=timeout_seconds,
         )

@@ -507,3 +507,106 @@ async def merge_retrieval_results(
     )
 
     return merged
+
+
+async def expand_via_dependency_graph(
+    guidelines: List[CodeGuideline],
+    repo_id: str,
+    direction: str = "callee",
+    max_hops: int = 1,
+) -> List[CodeGuideline]:
+    """
+    沿依赖图扩展一跳，将调用链相关 chunk 补入检索结果。
+
+    当前依赖图基于 metadata.calls 中的函数名做近似扩展，最多返回 5 个新增
+    chunk，避免补检索阶段的 token 膨胀。
+    """
+    if max_hops < 1:
+        return []
+
+    from app.services.dependency_graph import get_callees, get_callers
+
+    existing_ids = {guideline.chunk_id for guideline in guidelines}
+    expanded: List[CodeGuideline] = []
+    processed_seed_keys = set()
+    processed_related_symbols = set()
+    collection = get_collection(repo_id)
+    max_seed_guidelines = 5 if direction == "caller" else len(guidelines)
+    processed_seed_count = 0
+
+    for guideline in guidelines:
+        symbol_name = getattr(guideline, "name", "")
+        file_path = getattr(guideline, "file_path", "")
+        seed_key = (symbol_name, file_path)
+
+        if not symbol_name or not file_path or seed_key in processed_seed_keys:
+            continue
+        if processed_seed_count >= max_seed_guidelines:
+            break
+        processed_seed_keys.add(seed_key)
+        processed_seed_count += 1
+
+        if direction == "callee":
+            related_symbols = await get_callees(repo_id, symbol_name, file_path)
+        elif direction == "caller":
+            related_symbols = await get_callers(repo_id, symbol_name, file_path)
+        else:
+            logger.debug("[DepGraph] unsupported expansion direction: %s", direction)
+            return []
+
+        for related_symbol in related_symbols[:5]:
+            if len(expanded) >= 5:
+                break
+            if not related_symbol or related_symbol in processed_related_symbols:
+                continue
+            processed_related_symbols.add(related_symbol)
+
+            try:
+                symbol_results = collection.get(
+                    where={"name": related_symbol},
+                    include=["metadatas", "documents", "ids"],
+                    limit=3,
+                )
+                ids = symbol_results.get("ids") or []
+                metadatas = symbol_results.get("metadatas") or []
+                documents = symbol_results.get("documents") or []
+
+                for index, chunk_id in enumerate(ids):
+                    if len(expanded) >= 5:
+                        break
+                    if chunk_id in existing_ids:
+                        continue
+
+                    metadata = metadatas[index] if index < len(metadatas) else {}
+                    document = documents[index] if index < len(documents) else ""
+                    first_line = document.split("\n")[0][:100] if document else ""
+
+                    expanded.append(
+                        CodeGuideline(
+                            chunk_id=chunk_id,
+                            name=metadata.get("name", ""),
+                            file_path=metadata.get("file_path", ""),
+                            node_type=metadata.get("node_type", ""),
+                            start_line=int(metadata.get("start_line", 0)),
+                            end_line=int(metadata.get("end_line", 0)),
+                            description=f"[dep-graph:{direction}] {first_line}",
+                            relevance_score=0.65,
+                            source="dep_graph",
+                        )
+                    )
+                    existing_ids.add(chunk_id)
+            except Exception as exc:
+                logger.debug("[DepGraph] expand lookup failed for %s: %s", related_symbol, exc)
+
+        if len(expanded) >= 5:
+            break
+
+    logger.debug(
+        "[DepGraph] repo=%s, direction=%s, expanded=%s chunks from %s symbols",
+        repo_id,
+        direction,
+        len(expanded),
+        processed_seed_count + len(processed_related_symbols),
+    )
+
+    return expanded
