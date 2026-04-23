@@ -1,6 +1,7 @@
 # app/schemas/mcp_types.py
-from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class CodeGuideline(BaseModel):
@@ -22,3 +23,12 @@ class FileContext(BaseModel):
     end_line: int
     content: str
     language: str
+
+
+class GrepMatch(BaseModel):
+    """Grep 搜索结果：精确文本匹配的位置和上下文"""
+
+    file_path: str
+    line_no: int
+    line_content: str
+    context_lines: List[str] = Field(default_factory=list)
