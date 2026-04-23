@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.repository import Repository
 from app.services.query_fusion import fuse_query
 from app.services.code_searcher import extract_grep_patterns, grep_codebase, search_file_paths
+from app.services.evidence_checker import check_evidence_sufficiency
 from app.services.two_stage_retriever import (
     read_targeted_context,
     stage1_discovery,
@@ -218,6 +219,145 @@ async def _three_way_retrieval(
     return guidelines, code_contents, chunk_weights
 
 
+async def _run_supplemental_retrieval(
+    missing_aspects: List[str],
+    suggested_queries: List[str],
+    repo_id: str,
+    existing_guidelines: list,
+    existing_contents: List[str],
+    existing_weights: List[float],
+    index_data: Optional[dict] = None,
+    repo_dir: Optional[str] = None,
+) -> tuple[List[CodeGuideline], List[str], List[float]]:
+    """Run one extra grep/path retrieval round when evidence is insufficient."""
+
+    del missing_aspects
+
+    normalized_queries = []
+    seen = set()
+    for query in suggested_queries[:5]:
+        query = query.strip()
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        normalized_queries.append(query)
+
+    if not normalized_queries:
+        return existing_guidelines, existing_contents, existing_weights
+
+    from app.services.two_stage_retriever import merge_retrieval_results
+
+    async def _noop() -> List:
+        return []
+
+    grep_task = grep_codebase(repo_id, normalized_queries, repo_dir=repo_dir)
+    path_query = " ".join(normalized_queries)
+    path_task = search_file_paths(repo_id, path_query, index_data) if index_data else _noop()
+
+    grep_matches, path_files = await asyncio.gather(
+        grep_task,
+        path_task,
+        return_exceptions=True,
+    )
+    if isinstance(grep_matches, Exception):
+        logger.debug(f"[SupplementalRetrieval] grep failed: {grep_matches}")
+        grep_matches = []
+    if isinstance(path_files, Exception):
+        logger.debug(f"[SupplementalRetrieval] path search failed: {path_files}")
+        path_files = []
+
+    if not grep_matches and not path_files:
+        return existing_guidelines, existing_contents, existing_weights
+
+    supplemental_guidelines = await merge_retrieval_results(
+        vector_guidelines=existing_guidelines,
+        path_files=path_files,
+        grep_matches=grep_matches,
+        repo_id=repo_id,
+    )
+
+    existing_ids = {guideline.chunk_id for guideline in existing_guidelines}
+    new_guideline_by_id = {}
+    new_chunk_ids = []
+    for guideline in supplemental_guidelines:
+        if guideline.chunk_id in existing_ids or guideline.chunk_id in new_guideline_by_id:
+            continue
+        new_guideline_by_id[guideline.chunk_id] = guideline
+        new_chunk_ids.append(guideline.chunk_id)
+        if len(new_chunk_ids) >= 5:
+            break
+
+    if not new_chunk_ids:
+        return supplemental_guidelines, existing_contents, existing_weights
+
+    new_contents = await stage2_assembly(new_chunk_ids, repo_id)
+    aligned_chunk_ids = new_chunk_ids[:len(new_contents)]
+    new_weights = [
+        new_guideline_by_id[chunk_id].relevance_score
+        for chunk_id in aligned_chunk_ids
+    ]
+
+    return (
+        supplemental_guidelines,
+        existing_contents + new_contents,
+        existing_weights + new_weights,
+    )
+
+
+async def _apply_evidence_check(
+    query: str,
+    repo_id: str,
+    guidelines: List[CodeGuideline],
+    code_contents: List[str],
+    chunk_weights: List[float],
+    index_data: Optional[dict] = None,
+    repo_dir: Optional[str] = None,
+    timeout_seconds: float = 8.0,
+    log_prefix: str = "[ChatService]",
+) -> tuple[List[CodeGuideline], List[str], List[float]]:
+    """Check evidence sufficiency and optionally run one supplemental retrieval round."""
+
+    evidence_result = check_evidence_sufficiency(query, code_contents, guidelines)
+    if evidence_result.is_sufficient:
+        return guidelines, code_contents, chunk_weights
+
+    logger.info(
+        "%s evidence insufficient, trigger supplemental retrieval: missing=%s, suggested=%s",
+        log_prefix,
+        evidence_result.missing_aspects,
+        evidence_result.suggested_queries[:3],
+    )
+
+    try:
+        return await asyncio.wait_for(
+            _run_supplemental_retrieval(
+                evidence_result.missing_aspects,
+                evidence_result.suggested_queries,
+                repo_id,
+                guidelines,
+                code_contents,
+                chunk_weights,
+                index_data=index_data,
+                repo_dir=repo_dir,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "%s supplemental retrieval timed out (%.1fs), skip",
+            log_prefix,
+            timeout_seconds,
+        )
+        return guidelines, code_contents, chunk_weights
+    except Exception as exc:
+        logger.warning(
+            "%s supplemental retrieval failed, skip: %s",
+            log_prefix,
+            exc,
+        )
+        return guidelines, code_contents, chunk_weights
+
+
 async def _get_repo_dir(db: AsyncSession, repo_id: str) -> Optional[str]:
     """获取仓库磁盘路径，优先使用 Repository.local_path。"""
     try:
@@ -308,6 +448,17 @@ async def handle_chat(
                     )
             except Exception as _fe:
                 logger.debug(f"[ChatService] 规划文件读取失败 {target.file_path}: {_fe}")
+
+    guidelines, code_contents, chunk_weights = await _apply_evidence_check(
+        fused_query,
+        repo_id,
+        guidelines,
+        code_contents,
+        chunk_weights,
+        index_data=index_data,
+        repo_dir=repo_dir,
+        log_prefix="[ChatService]",
+    )
 
     context_budget = _compute_context_budget(model, system_prompt, query)
     code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
@@ -457,6 +608,17 @@ async def handle_chat_stream(
                     )
             except Exception as _fe:
                 logger.debug(f"[ChatService] 规划文件读取失败 {target.file_path}: {_fe}")
+
+    guidelines, code_contents, chunk_weights = await _apply_evidence_check(
+        fused_query,
+        repo_id,
+        guidelines,
+        code_contents,
+        chunk_weights,
+        index_data=index_data,
+        repo_dir=repo_dir,
+        log_prefix="[ChatService]",
+    )
 
     context_budget = _compute_context_budget(model, system_prompt, query)
     code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
@@ -622,6 +784,18 @@ async def handle_deep_research_stream(
                     )
             except Exception as _fe:
                 logger.debug(f"[DeepResearch] 规划文件读取失败 {target.file_path}: {_fe}")
+
+    if is_first:
+        guidelines, code_contents, chunk_weights = await _apply_evidence_check(
+            fused_query,
+            repo_id,
+            guidelines,
+            code_contents,
+            chunk_weights,
+            index_data=index_data,
+            repo_dir=repo_dir,
+            log_prefix="[DeepResearch]",
+        )
 
     # 7. 组装用户 prompt（当前轮的指令）
     if is_first:

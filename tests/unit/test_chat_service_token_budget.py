@@ -172,3 +172,37 @@ async def test_handle_deep_research_stream_trims_chunks_before_join_with_aligned
     assert "Research Plan" in captured["budget_user_query"]
     assert captured["rag_context"] == "trimmed-1\n\n---\n\ntrimmed-2"
     assert events[-1] == {"type": "done"}
+
+
+@pytest.mark.asyncio
+async def test_apply_evidence_check_degrades_when_supplemental_retrieval_fails():
+    guidelines = _build_guidelines()
+    code_contents = ["base-high", "base-low"]
+    chunk_weights = [0.9, 0.4]
+    insufficient_result = SimpleNamespace(
+        is_sufficient=False,
+        missing_aspects=["call_chain"],
+        suggested_queries=["handle_chat_stream"],
+    )
+
+    with (
+        patch(
+            "app.services.chat_service.check_evidence_sufficiency",
+            return_value=insufficient_result,
+        ),
+        patch(
+            "app.services.chat_service._run_supplemental_retrieval",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+    ):
+        result = await chat_service._apply_evidence_check(
+            "complex query",
+            "repo-1",
+            guidelines,
+            code_contents,
+            chunk_weights,
+            index_data={"app/main.py": {}},
+            repo_dir="E:/repo",
+        )
+
+    assert result == (guidelines, code_contents, chunk_weights)
