@@ -2,11 +2,22 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Mapping, Optional
 
 from app.core.redis_client import get_redis
 
 SESSION_TTL = 86400  # 24 小时
+
+
+async def _hset_mapping(redis, key: str, mapping: Mapping[str, str]) -> None:
+    """Use single-field HSET commands for compatibility with older Redis servers."""
+    pipe = redis.pipeline(transaction=True)
+    try:
+        for field, value in mapping.items():
+            pipe.hset(key, field, value)
+        await pipe.execute()
+    finally:
+        await pipe.aclose()
 
 
 async def create_session(repo_id: str) -> str:
@@ -15,7 +26,7 @@ async def create_session(repo_id: str) -> str:
     redis = await get_redis()
     key = f"conversation:{session_id}"
 
-    await redis.hset(key, mapping={
+    await _hset_mapping(redis, key, {
         "messages": json.dumps([], ensure_ascii=False),
         "repo_id": repo_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -86,7 +97,7 @@ async def append_turn(
     existing_tokens = int(existing_tokens_str or "0")
 
     # 原子性覆盖写入
-    await redis.hset(key, mapping={
+    await _hset_mapping(redis, key, {
         "messages": json.dumps(messages, ensure_ascii=False),
         "updated_at": now,
         "total_tokens": str(existing_tokens + tokens_used),

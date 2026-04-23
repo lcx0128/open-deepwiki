@@ -3,7 +3,7 @@
 Unit tests for app/services/conversation_memory.py
 
 Covers:
-- create_session: returns valid UUID, calls redis.hset and redis.expire
+- create_session: returns valid UUID, writes Redis hash fields and calls redis.expire
 - get_history: empty list when no data, parsed messages when data exists
 - append_turn: adds user+assistant messages, updates total_tokens, refreshes TTL
 - session_exists: True when key exists, False when not
@@ -22,16 +22,36 @@ from app.services.conversation_memory import (
 )
 
 
+def _make_pipeline_mock() -> MagicMock:
+    """Build a Redis pipeline mock that supports command chaining."""
+    pipe = MagicMock()
+    pipe.hset.return_value = pipe
+    pipe.execute = AsyncMock(return_value=[])
+    pipe.aclose = AsyncMock(return_value=None)
+    return pipe
+
+
 def _make_redis_mock(**overrides) -> AsyncMock:
     """Build a minimal Redis AsyncMock with sensible defaults."""
     mock = AsyncMock()
+    pipe = _make_pipeline_mock()
     mock.hset = AsyncMock(return_value=1)
+    mock.pipeline = MagicMock(return_value=pipe)
     mock.expire = AsyncMock(return_value=True)
     mock.hget = AsyncMock(return_value=None)
     mock.exists = AsyncMock(return_value=0)
     for attr, val in overrides.items():
         setattr(mock, attr, val)
     return mock
+
+
+def _hash_mapping_from_pipeline(redis_mock: AsyncMock) -> dict:
+    """Collect field/value pairs written via pipeline.hset calls."""
+    pipe = redis_mock.pipeline.return_value
+    return {
+        call_args.args[1]: call_args.args[2]
+        for call_args in pipe.hset.call_args_list
+    }
 
 
 class TestCreateSession:
@@ -50,15 +70,18 @@ class TestCreateSession:
 
     @pytest.mark.asyncio
     async def test_calls_hset_with_correct_key(self):
-        """create_session calls redis.hset with key 'conversation:{session_id}'."""
+        """create_session writes hash fields with key 'conversation:{session_id}'."""
         redis_mock = _make_redis_mock()
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
             session_id = await create_session("repo-abc")
 
-        redis_mock.hset.assert_called_once()
-        call_args = redis_mock.hset.call_args
-        key_used = call_args.args[0] if call_args.args else call_args.kwargs.get("name", "")
-        assert key_used == f"conversation:{session_id}"
+        redis_mock.pipeline.assert_called_once_with(transaction=True)
+        pipe = redis_mock.pipeline.return_value
+        assert pipe.hset.call_count == 5
+        assert {
+            call_args.args[0] for call_args in pipe.hset.call_args_list
+        } == {f"conversation:{session_id}"}
+        pipe.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_hset_stores_repo_id(self):
@@ -67,8 +90,7 @@ class TestCreateSession:
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
             await create_session("my-repo-id")
 
-        call_args = redis_mock.hset.call_args
-        mapping = call_args.kwargs.get("mapping", {})
+        mapping = _hash_mapping_from_pipeline(redis_mock)
         assert mapping.get("repo_id") == "my-repo-id"
 
     @pytest.mark.asyncio
@@ -78,8 +100,7 @@ class TestCreateSession:
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
             await create_session("repo-x")
 
-        call_args = redis_mock.hset.call_args
-        mapping = call_args.kwargs.get("mapping", {})
+        mapping = _hash_mapping_from_pipeline(redis_mock)
         messages = json.loads(mapping.get("messages", "null"))
         assert messages == []
 
@@ -170,12 +191,8 @@ class TestAppendTurn:
                 return "0"
             return None
 
-        async def fake_hset(key, mapping):
-            captured_mapping.update(mapping)
-
         redis_mock = _make_redis_mock(
             hget=AsyncMock(side_effect=fake_hget),
-            hset=AsyncMock(side_effect=fake_hset),
         )
 
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
@@ -185,6 +202,7 @@ class TestAppendTurn:
                 assistant_response="It is a test.",
             )
 
+        captured_mapping.update(_hash_mapping_from_pipeline(redis_mock))
         written_messages = json.loads(captured_mapping["messages"])
         assert len(written_messages) == 2
         assert written_messages[0]["role"] == "user"
@@ -208,17 +226,14 @@ class TestAppendTurn:
                 return "50"
             return None
 
-        async def fake_hset(key, mapping):
-            captured_mapping.update(mapping)
-
         redis_mock = _make_redis_mock(
             hget=AsyncMock(side_effect=fake_hget),
-            hset=AsyncMock(side_effect=fake_hset),
         )
 
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
             await append_turn("sess-2", "new q", "new a", tokens_used=30)
 
+        captured_mapping.update(_hash_mapping_from_pipeline(redis_mock))
         written = json.loads(captured_mapping["messages"])
         assert len(written) == 4  # 2 existing + 2 new
         assert written[0]["content"] == "prior question"
@@ -236,17 +251,14 @@ class TestAppendTurn:
                 return "100"
             return None
 
-        async def fake_hset(key, mapping):
-            captured_mapping.update(mapping)
-
         redis_mock = _make_redis_mock(
             hget=AsyncMock(side_effect=fake_hget),
-            hset=AsyncMock(side_effect=fake_hset),
         )
 
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
             await append_turn("sess-3", "q", "a", tokens_used=42)
 
+        captured_mapping.update(_hash_mapping_from_pipeline(redis_mock))
         assert captured_mapping["total_tokens"] == "142"
 
     @pytest.mark.asyncio
@@ -276,18 +288,15 @@ class TestAppendTurn:
                 return json.dumps([])
             return "0"
 
-        async def fake_hset(key, mapping):
-            captured_mapping.update(mapping)
-
         redis_mock = _make_redis_mock(
             hget=AsyncMock(side_effect=fake_hget),
-            hset=AsyncMock(side_effect=fake_hset),
         )
         refs = [{"file_path": "app/main.py", "start_line": 1, "end_line": 10, "name": "main"}]
 
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
             await append_turn("sess-5", "q", "a", chunk_refs=refs)
 
+        captured_mapping.update(_hash_mapping_from_pipeline(redis_mock))
         written = json.loads(captured_mapping["messages"])
         assistant_msg = written[1]
         assert assistant_msg["chunk_refs"] == refs
@@ -302,17 +311,14 @@ class TestAppendTurn:
                 return json.dumps([])
             return "0"
 
-        async def fake_hset(key, mapping):
-            captured_mapping.update(mapping)
-
         redis_mock = _make_redis_mock(
             hget=AsyncMock(side_effect=fake_hget),
-            hset=AsyncMock(side_effect=fake_hset),
         )
 
         with patch("app.services.conversation_memory.get_redis", AsyncMock(return_value=redis_mock)):
             await append_turn("sess-6", "q", "a", chunk_refs=None)
 
+        captured_mapping.update(_hash_mapping_from_pipeline(redis_mock))
         written = json.loads(captured_mapping["messages"])
         assert written[1]["chunk_refs"] == []
 
