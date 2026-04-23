@@ -376,3 +376,134 @@ async def stage2_gap_fill_constants(
         logger.info(f"[Stage2GapFill] repo={repo_id}, filled={len(gap_contents)} missing constant chunks")
 
     return gap_contents
+
+
+async def merge_retrieval_results(
+    vector_guidelines: List[CodeGuideline],
+    path_files: List[str],
+    grep_matches: List,
+    repo_id: str,
+) -> List[CodeGuideline]:
+    """
+    合并三路检索结果：Stage 1、路径搜索和 grep 搜索。
+
+    去重策略基于 (file_path, chunk_id)，按相关度降序返回。
+    """
+    max_path_files = 10
+    max_grep_matches = 20
+    max_merged_total = 50
+
+    merged = list(vector_guidelines)
+    existing_keys = {(guideline.file_path, guideline.chunk_id) for guideline in merged}
+
+    path_files = path_files[:max_path_files]
+    grep_matches = grep_matches[:max_grep_matches]
+
+    collection = get_collection(repo_id)
+    file_chunks_cache = {}
+    path_added = 0
+    grep_added = 0
+
+    def _get_file_chunks(file_path: str, limit: int | None = None):
+        cache_key = (file_path, limit)
+        if cache_key not in file_chunks_cache:
+            kwargs = {
+                "where": {"file_path": file_path},
+                "include": ["metadatas", "documents", "ids"],
+            }
+            if limit is not None:
+                kwargs["limit"] = limit
+            file_chunks_cache[cache_key] = collection.get(**kwargs)
+        return file_chunks_cache[cache_key]
+
+    for file_path in path_files:
+        try:
+            file_chunks = _get_file_chunks(file_path, limit=5)
+            ids = file_chunks.get("ids") or []
+            metadatas = file_chunks.get("metadatas") or []
+            documents = file_chunks.get("documents") or []
+
+            for index, chunk_id in enumerate(ids):
+                key = (file_path, chunk_id)
+                if key in existing_keys:
+                    continue
+
+                metadata = metadatas[index] if index < len(metadatas) else {}
+                document = documents[index] if index < len(documents) else ""
+                first_line = document.split("\n")[0][:100] if document else ""
+
+                merged.append(
+                    CodeGuideline(
+                        chunk_id=chunk_id,
+                        name=metadata.get("name", ""),
+                        file_path=file_path,
+                        node_type=metadata.get("node_type", ""),
+                        start_line=int(metadata.get("start_line", 0)),
+                        end_line=int(metadata.get("end_line", 0)),
+                        description=first_line,
+                        relevance_score=0.6,
+                        source="path",
+                    )
+                )
+                existing_keys.add(key)
+                path_added += 1
+        except Exception as exc:
+            logger.debug(f"[Merge] path file lookup failed for {file_path}: {exc}")
+
+    for match in grep_matches:
+        file_path = getattr(match, "file_path", "")
+        line_no = getattr(match, "line_no", 0)
+        if not file_path or not line_no:
+            continue
+
+        try:
+            file_chunks = _get_file_chunks(file_path)
+            ids = file_chunks.get("ids") or []
+            metadatas = file_chunks.get("metadatas") or []
+            documents = file_chunks.get("documents") or []
+
+            for index, chunk_id in enumerate(ids):
+                key = (file_path, chunk_id)
+                if key in existing_keys:
+                    continue
+
+                metadata = metadatas[index] if index < len(metadatas) else {}
+                start_line = int(metadata.get("start_line", 0))
+                end_line = int(metadata.get("end_line", 0))
+                if not (start_line <= line_no <= end_line):
+                    continue
+
+                document = documents[index] if index < len(documents) else ""
+                first_line = document.split("\n")[0][:100] if document else ""
+
+                merged.append(
+                    CodeGuideline(
+                        chunk_id=chunk_id,
+                        name=metadata.get("name", ""),
+                        file_path=file_path,
+                        node_type=metadata.get("node_type", ""),
+                        start_line=start_line,
+                        end_line=end_line,
+                        description=first_line,
+                        relevance_score=0.75,
+                        source="grep",
+                    )
+                )
+                existing_keys.add(key)
+                grep_added += 1
+        except Exception as exc:
+            logger.debug(f"[Merge] grep match lookup failed for {file_path}:{line_no}: {exc}")
+
+    merged.sort(key=lambda guideline: guideline.relevance_score, reverse=True)
+    merged = merged[:max_merged_total]
+
+    logger.debug(
+        "[Merge] repo=%s, vector=%s, path_new=%s, grep_new=%s, total=%s",
+        repo_id,
+        len(vector_guidelines),
+        path_added,
+        grep_added,
+        len(merged),
+    )
+
+    return merged

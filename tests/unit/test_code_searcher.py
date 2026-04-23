@@ -4,10 +4,11 @@ Unit tests for app/services/code_searcher.py.
 """
 import os
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.schemas.mcp_types import GrepMatch
+from app.schemas.mcp_types import CodeGuideline, GrepMatch
 from app.services.code_searcher import (
     _check_rg_available,
     _parse_rg_output,
@@ -311,3 +312,125 @@ class TestGrepCodebase:
             results = await grep_codebase("repo-1", ["TARGET"], repo_dir=tmpdir, context_lines=1)
 
         assert results == expected
+
+
+class TestMergeRetrievalResults:
+    @pytest.mark.asyncio
+    async def test_dedup_by_file_path_and_chunk_id(self):
+        from app.services.two_stage_retriever import merge_retrieval_results
+
+        vector_guidelines = [
+            CodeGuideline(
+                chunk_id="chunk-1",
+                name="func_a",
+                file_path="a.py",
+                node_type="function_definition",
+                start_line=1,
+                end_line=10,
+                description="func_a",
+                relevance_score=0.9,
+                source="stage1",
+            )
+        ]
+        grep_matches = [
+            GrepMatch(
+                file_path="a.py",
+                line_no=5,
+                line_content="func_a()",
+                context_lines=[],
+            )
+        ]
+
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {
+            "ids": ["chunk-1"],
+            "metadatas": [{
+                "name": "func_a",
+                "file_path": "a.py",
+                "node_type": "function_definition",
+                "start_line": 1,
+                "end_line": 10,
+            }],
+            "documents": ["def func_a():\n    pass"],
+        }
+
+        with patch("app.services.two_stage_retriever.get_collection", return_value=mock_collection):
+            result = await merge_retrieval_results(vector_guidelines, [], grep_matches, "repo-1")
+
+        assert [guideline.chunk_id for guideline in result].count("chunk-1") == 1
+
+    @pytest.mark.asyncio
+    async def test_grep_score_higher_than_path(self):
+        from app.services.two_stage_retriever import merge_retrieval_results
+
+        def fake_get(where=None, include=None, limit=None):
+            if where == {"file_path": "b.py"} and limit == 5:
+                return {
+                    "ids": ["chunk-path"],
+                    "metadatas": [{
+                        "name": "func_b_path",
+                        "file_path": "b.py",
+                        "node_type": "function_definition",
+                        "start_line": 20,
+                        "end_line": 30,
+                    }],
+                    "documents": ["def func_b_path():\n    pass"],
+                }
+
+            return {
+                "ids": ["chunk-grep"],
+                "metadatas": [{
+                    "name": "func_b_grep",
+                    "file_path": "b.py",
+                    "node_type": "function_definition",
+                    "start_line": 1,
+                    "end_line": 10,
+                }],
+                "documents": ["def func_b_grep():\n    pass"],
+            }
+
+        mock_collection = MagicMock()
+        mock_collection.get.side_effect = fake_get
+        grep_matches = [
+            GrepMatch(
+                file_path="b.py",
+                line_no=5,
+                line_content="func_b_grep()",
+                context_lines=[],
+            )
+        ]
+
+        with patch("app.services.two_stage_retriever.get_collection", return_value=mock_collection):
+            result = await merge_retrieval_results([], ["b.py"], grep_matches, "repo-1")
+
+        grep_items = [guideline for guideline in result if guideline.source == "grep"]
+        path_items = [guideline for guideline in result if guideline.source == "path"]
+
+        assert grep_items
+        assert path_items
+        assert grep_items[0].relevance_score > path_items[0].relevance_score
+
+    @pytest.mark.asyncio
+    async def test_empty_path_and_grep_returns_vector_only(self):
+        from app.services.two_stage_retriever import merge_retrieval_results
+
+        vector_guidelines = [
+            CodeGuideline(
+                chunk_id="vector-1",
+                name="func_v",
+                file_path="x.py",
+                node_type="function_definition",
+                start_line=1,
+                end_line=5,
+                description="",
+                relevance_score=0.8,
+                source="stage1",
+            )
+        ]
+
+        mock_collection = MagicMock()
+        with patch("app.services.two_stage_retriever.get_collection", return_value=mock_collection):
+            result = await merge_retrieval_results(vector_guidelines, [], [], "repo-1")
+
+        assert len(result) == 1
+        assert result[0].source == "stage1"

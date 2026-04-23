@@ -310,10 +310,13 @@ class TestSSEEventOrder:
         mock_adapter.stream_with_rate_limit = MagicMock(return_value=fake_stream_with_rate_limit())
 
         with patch("app.services.chat_service.fuse_query", new=AsyncMock(return_value="fused query")), \
-             patch("app.services.chat_service.stage1_discovery", new=AsyncMock(return_value=guidelines)), \
-             patch("app.services.chat_service.stage2_assembly", new=AsyncMock(return_value=["chunk_1"])), \
+             patch(
+                 "app.services.chat_service._three_way_retrieval",
+                 new=AsyncMock(return_value=(guidelines, ["chunk_1"], [0.98])),
+             ), \
              patch("app.services.chat_service.stage2_gap_fill_constants", new=AsyncMock(return_value=[])), \
-             patch("app.services.chat_service._get_codebase_index_text", new=AsyncMock(return_value=None)), \
+             patch("app.services.chat_service._get_codebase_index", new=AsyncMock(return_value=(None, None))), \
+             patch("app.services.chat_service._get_repo_dir", new=AsyncMock(return_value=None)), \
              patch("app.services.chat_service._get_repo_name", new=AsyncMock(return_value="test-repo")), \
              patch("app.services.chat_service.create_session", new=AsyncMock(return_value="test-session-id")), \
              patch("app.services.chat_service.session_exists", new=AsyncMock(return_value=True)), \

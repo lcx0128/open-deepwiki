@@ -77,11 +77,18 @@ def _patch_common_dependencies(stack: ExitStack, captured: dict):
     stack.enter_context(patch("app.services.chat_service.get_history", AsyncMock(return_value=[])))
     stack.enter_context(patch("app.services.chat_service.append_turn", AsyncMock()))
     stack.enter_context(patch("app.services.chat_service.fuse_query", AsyncMock(return_value="fused query")))
-    stack.enter_context(patch("app.services.chat_service.stage1_discovery", AsyncMock(return_value=_build_guidelines())))
-    stack.enter_context(patch("app.services.chat_service.stage2_assembly", AsyncMock(return_value=["base-high", "base-low"])))
+    stack.enter_context(
+        patch(
+            "app.services.chat_service._three_way_retrieval",
+            AsyncMock(return_value=(_build_guidelines(), ["base-high", "base-low"], [0.9, 0.4])),
+        )
+    )
     stack.enter_context(patch("app.services.chat_service.stage2_gap_fill_constants", AsyncMock(return_value=["gap-content"])))
     stack.enter_context(patch("app.services.chat_service._get_repo_name", AsyncMock(return_value="repo-name")))
-    stack.enter_context(patch("app.services.chat_service._get_codebase_index_text", AsyncMock(return_value="index text")))
+    stack.enter_context(
+        patch("app.services.chat_service._get_codebase_index", AsyncMock(return_value=("index text", {"app/main.py": {}})))
+    )
+    stack.enter_context(patch("app.services.chat_service._get_repo_dir", AsyncMock(return_value="E:/repo")))
     stack.enter_context(patch("app.services.chat_service.is_broad_query", return_value=True))
     stack.enter_context(
         patch(

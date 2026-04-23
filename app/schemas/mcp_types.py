@@ -14,6 +14,7 @@ class CodeGuideline(BaseModel):
     end_line: int
     description: str
     relevance_score: float
+    source: str = "stage1"
 
 
 class FileContext(BaseModel):

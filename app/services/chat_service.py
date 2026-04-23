@@ -1,11 +1,14 @@
 # app/services/chat_service.py
+import asyncio
 import logging
 from typing import AsyncIterator, Optional, List
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.repository import Repository
 from app.services.query_fusion import fuse_query
+from app.services.code_searcher import extract_grep_patterns, grep_codebase, search_file_paths
 from app.services.two_stage_retriever import (
     read_targeted_context,
     stage1_discovery,
@@ -139,17 +142,17 @@ async def _get_repo_name(db: AsyncSession, repo_id: str) -> str:
     return repo_id
 
 
-async def _get_codebase_index_text(db: AsyncSession, repo_id: str) -> Optional[str]:
-    """加载代码库索引并格式化为文本，用于注入 system prompt 和检索规划"""
+async def _get_codebase_index(db: AsyncSession, repo_id: str) -> tuple[Optional[str], Optional[dict]]:
+    """加载代码库索引，同时返回格式化文本与原始索引数据。"""
     try:
         from app.models.repo_index import RepoIndex
         from app.services.codebase_indexer import format_codebase_index
         repo_index = await db.get(RepoIndex, repo_id)
         if repo_index and repo_index.index_json:
-            return format_codebase_index(repo_index.index_json)
+            return format_codebase_index(repo_index.index_json), repo_index.index_json
     except Exception as e:
         logger.debug(f"[ChatService] 无法加载代码库索引: {e}")
-    return None
+    return None, None
 
 
 def _compute_context_budget(model: str, system_prompt: str, user_query: str) -> int:
@@ -159,6 +162,71 @@ def _compute_context_budget(model: str, system_prompt: str, user_query: str) -> 
     fixed_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_query) + 100
     remaining = budget - fixed_tokens
     return int(max(remaining, 0) * CONTEXT_BUDGET_RATIO)
+
+
+async def _three_way_retrieval(
+    fused_query: str,
+    repo_id: str,
+    index_data: Optional[dict],
+    repo_dir: Optional[str] = None,
+    top_k: int = 20,
+) -> tuple[List[CodeGuideline], List[str], List[float]]:
+    """三路并行检索：Stage 1 + 路径搜索 + grep 搜索。"""
+    from app.services.two_stage_retriever import merge_retrieval_results
+
+    grep_patterns = extract_grep_patterns(fused_query)
+
+    async def _empty_grep() -> List:
+        return []
+
+    vector_task = stage1_discovery(fused_query, repo_id, top_k=top_k)
+    path_task = search_file_paths(repo_id, fused_query, index_data)
+    grep_task = (
+        grep_codebase(repo_id, grep_patterns, repo_dir=repo_dir)
+        if grep_patterns
+        else _empty_grep()
+    )
+
+    vector_guidelines, path_files, grep_matches = await asyncio.gather(
+        vector_task,
+        path_task,
+        grep_task,
+        return_exceptions=True,
+    )
+
+    if isinstance(vector_guidelines, Exception):
+        logger.warning(f"[ThreeWay] vector search failed: {vector_guidelines}")
+        vector_guidelines = []
+    if isinstance(path_files, Exception):
+        logger.debug(f"[ThreeWay] path search failed: {path_files}")
+        path_files = []
+    if isinstance(grep_matches, Exception):
+        logger.debug(f"[ThreeWay] grep search failed: {grep_matches}")
+        grep_matches = []
+
+    guidelines = await merge_retrieval_results(
+        vector_guidelines=vector_guidelines,
+        path_files=path_files,
+        grep_matches=grep_matches,
+        repo_id=repo_id,
+    )
+
+    top_chunk_ids = [guideline.chunk_id for guideline in guidelines[:10]]
+    code_contents = await stage2_assembly(top_chunk_ids, repo_id)
+    chunk_weights = [guideline.relevance_score for guideline in guidelines[:len(code_contents)]]
+
+    return guidelines, code_contents, chunk_weights
+
+
+async def _get_repo_dir(db: AsyncSession, repo_id: str) -> Optional[str]:
+    """获取仓库磁盘路径，优先使用 Repository.local_path。"""
+    try:
+        repo_obj = await db.get(Repository, repo_id)
+        if repo_obj and repo_obj.local_path:
+            return repo_obj.local_path
+    except Exception as exc:
+        logger.debug(f"[ChatService] 无法加载仓库路径: {exc}")
+    return None
 
 
 async def handle_chat(
@@ -197,13 +265,18 @@ async def handle_chat(
     # 2. 查询融合
     fused_query = await fuse_query(query, history, llm_provider, llm_model)
 
-    # 3. Stage 1: 检索导引
-    guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
+    repo_name = await _get_repo_name(db, repo_id)
+    codebase_index_text, index_data = await _get_codebase_index(db, repo_id)
+    repo_dir = await _get_repo_dir(db, repo_id)
 
-    # 4. Stage 2: 获取完整代码（选取前 10 个最相关的）
-    top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
-    code_contents = await stage2_assembly(top_chunk_ids, repo_id)
-    chunk_weights = [g.relevance_score for g in guidelines[:len(code_contents)]]
+    # 3. 三路并行检索
+    guidelines, code_contents, chunk_weights = await _three_way_retrieval(
+        fused_query,
+        repo_id,
+        index_data,
+        repo_dir=repo_dir,
+        top_k=20,
+    )
 
     # 4.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
     try:
@@ -216,8 +289,6 @@ async def handle_chat(
         logger.debug(f"[ChatService] gap-fill failed (non-fatal): {_gf}")
 
     # 5. Token 预算管理 + 代码库索引注入
-    repo_name = await _get_repo_name(db, repo_id)
-    codebase_index_text = await _get_codebase_index_text(db, repo_id)
     system_prompt = CHAT_SYSTEM_PROMPT.format(repo_name=repo_name)
     if codebase_index_text:
         system_prompt += f"\n\n{codebase_index_text}"
@@ -343,11 +414,18 @@ async def handle_chat_stream(
     # 2. 查询融合
     fused_query = await fuse_query(query, history, llm_provider, llm_model)
 
-    # 3. Stage 1 + Stage 2 检索
-    guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
-    top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
-    code_contents = await stage2_assembly(top_chunk_ids, repo_id)
-    chunk_weights = [g.relevance_score for g in guidelines[:len(code_contents)]]
+    repo_name = await _get_repo_name(db, repo_id)
+    codebase_index_text, index_data = await _get_codebase_index(db, repo_id)
+    repo_dir = await _get_repo_dir(db, repo_id)
+
+    # 3. 三路并行检索
+    guidelines, code_contents, chunk_weights = await _three_way_retrieval(
+        fused_query,
+        repo_id,
+        index_data,
+        repo_dir=repo_dir,
+        top_k=20,
+    )
 
     # 3.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
     try:
@@ -360,8 +438,6 @@ async def handle_chat_stream(
         logger.debug(f"[ChatService] gap-fill failed (non-fatal): {_gf}")
 
     # 4. Token 预算管理 + 代码库索引注入
-    repo_name = await _get_repo_name(db, repo_id)
-    codebase_index_text = await _get_codebase_index_text(db, repo_id)
     system_prompt = CHAT_SYSTEM_PROMPT.format(repo_name=repo_name)
     if codebase_index_text:
         system_prompt += f"\n\n{codebase_index_text}"
@@ -504,11 +580,17 @@ async def handle_deep_research_stream(
     ]
     fused_query = await fuse_query(query, history_for_fusion, llm_provider, llm_model)
 
-    # 5. 双阶段 RAG 检索
-    guidelines = await stage1_discovery(fused_query, repo_id, top_k=20)
-    top_chunk_ids = [g.chunk_id for g in guidelines[:10]]
-    code_contents = await stage2_assembly(top_chunk_ids, repo_id)
-    chunk_weights = [g.relevance_score for g in guidelines[:len(code_contents)]]
+    codebase_index_text, index_data = await _get_codebase_index(db, repo_id)
+    repo_dir = await _get_repo_dir(db, repo_id)
+
+    # 5. 三路检索
+    guidelines, code_contents, chunk_weights = await _three_way_retrieval(
+        fused_query,
+        repo_id,
+        index_data,
+        repo_dir=repo_dir,
+        top_k=20,
+    )
 
     # 5.5. Round 2: 从已检索文件中补取遗漏的常量 chunk
     try:
@@ -521,7 +603,6 @@ async def handle_deep_research_stream(
         logger.debug(f"[DeepResearch] gap-fill failed (non-fatal): {_gf}")
 
     # 6. 组装系统 prompt + 代码库索引注入
-    codebase_index_text = await _get_codebase_index_text(db, repo_id)
     system_prompt = DEEP_RESEARCH_SYSTEM_PROMPT.format(repo_name=repo_name)
     if codebase_index_text:
         system_prompt += f"\n\n{codebase_index_text}"
