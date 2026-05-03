@@ -1,8 +1,11 @@
 """Evidence sufficiency checks for chat retrieval."""
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 NO_RESULTS_LABEL = "\u65e0\u68c0\u7d22\u7ed3\u679c"
@@ -98,11 +101,17 @@ def check_evidence_sufficiency(
     """Judge whether the current retrieved evidence is enough to answer."""
 
     if not code_contents:
-        return EvidenceCheckResult(
+        result = EvidenceCheckResult(
             is_sufficient=False,
             missing_aspects=[NO_RESULTS_LABEL],
             suggested_queries=_extract_identifiers_for_grep(query),
         )
+        logger.debug(
+            "[EvidenceCheck] insufficient: no code contents, query=%r, suggested=%s",
+            query[:120],
+            result.suggested_queries[:5],
+        )
+        return result
 
     detected_aspects = _detect_complex_aspects(query)
     query_is_complex = bool(detected_aspects)
@@ -117,11 +126,19 @@ def check_evidence_sufficiency(
     has_additional_content_files = bool(content_hit_files - guideline_hit_files)
 
     if len(guidelines) < 3 and query_is_complex and not has_additional_content_files:
-        return EvidenceCheckResult(
+        result = EvidenceCheckResult(
             is_sufficient=False,
             missing_aspects=detected_aspects,
             suggested_queries=_extract_identifiers_for_grep(query),
         )
+        logger.debug(
+            "[EvidenceCheck] insufficient: low_guideline_count=%s, aspects=%s, hit_files=%s, suggested=%s",
+            len(guidelines),
+            detected_aspects,
+            sorted(hit_files),
+            result.suggested_queries[:5],
+        )
+        return result
 
     is_cross_module = (
         "cross_module" in detected_aspects or "call_chain" in detected_aspects
@@ -133,16 +150,37 @@ def check_evidence_sufficiency(
             if name and name not in suggested_queries:
                 suggested_queries.append(name)
 
-        return EvidenceCheckResult(
+        result = EvidenceCheckResult(
             is_sufficient=False,
             missing_aspects=detected_aspects,
             suggested_queries=suggested_queries[:10],
         )
+        logger.debug(
+            "[EvidenceCheck] insufficient: cross_module_single_file, aspects=%s, hit_files=%s, suggested=%s",
+            detected_aspects,
+            sorted(hit_files),
+            result.suggested_queries[:5],
+        )
+        return result
 
     if len(guidelines) >= 5 and not query_is_complex:
-        return EvidenceCheckResult(is_sufficient=True)
+        result = EvidenceCheckResult(is_sufficient=True)
+        logger.debug(
+            "[EvidenceCheck] sufficient: simple_query guideline_count=%s hit_files=%s",
+            len(guidelines),
+            sorted(hit_files),
+        )
+        return result
 
-    return EvidenceCheckResult(is_sufficient=True)
+    result = EvidenceCheckResult(is_sufficient=True)
+    logger.debug(
+        "[EvidenceCheck] sufficient: default path, aspects=%s, guideline_count=%s, hit_files=%s, extra_content_files=%s",
+        detected_aspects,
+        len(guidelines),
+        sorted(hit_files),
+        has_additional_content_files,
+    )
+    return result
 
 
 def _detect_complex_aspects(query: str) -> List[str]:

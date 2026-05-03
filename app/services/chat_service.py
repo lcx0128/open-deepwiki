@@ -128,6 +128,40 @@ Review ALL previous research in the conversation history and synthesize a compre
 MANDATORY: This must be a complete, standalone answer that synthesizes ALL research iterations."""
 
 
+def _truncate_for_log(text: Optional[str], limit: int = 160) -> str:
+    """Return a compact one-line preview for debug logging."""
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def _summarize_guidelines(guidelines: List[CodeGuideline], limit: int = 5) -> list[dict]:
+    """Summarize guideline hits without dumping full documents into logs."""
+    summary = []
+    for guideline in guidelines[:limit]:
+        summary.append(
+            {
+                "name": guideline.name,
+                "file": guideline.file_path,
+                "lines": f"{guideline.start_line}-{guideline.end_line}",
+                "score": round(guideline.relevance_score, 4),
+                "source": getattr(guideline, "source", None),
+            }
+        )
+    return summary
+
+
+def _summarize_code_contents(code_contents: List[str], limit: int = 3) -> List[str]:
+    """Extract the first header line from assembled code chunks for logging."""
+    headers: List[str] = []
+    for content in code_contents[:limit]:
+        headers.append(_truncate_for_log(content.splitlines()[0] if content else "", 120))
+    return headers
+
+
 async def _get_repo_name(db: AsyncSession, repo_id: str) -> str:
     """获取仓库名称，用于 system prompt"""
     try:
@@ -187,6 +221,15 @@ async def _three_way_retrieval(
         if grep_patterns
         else _empty_grep()
     )
+    logger.debug(
+        "[ThreeWay] start: repo=%s query=%r grep_patterns=%s has_index=%s repo_dir=%s top_k=%s",
+        repo_id,
+        _truncate_for_log(fused_query, 140),
+        grep_patterns[:8],
+        bool(index_data),
+        repo_dir,
+        top_k,
+    )
 
     vector_guidelines, path_files, grep_matches = await asyncio.gather(
         vector_task,
@@ -215,6 +258,16 @@ async def _three_way_retrieval(
     top_chunk_ids = [guideline.chunk_id for guideline in guidelines[:10]]
     code_contents = await stage2_assembly(top_chunk_ids, repo_id)
     chunk_weights = [guideline.relevance_score for guideline in guidelines[:len(code_contents)]]
+    logger.debug(
+        "[ThreeWay] done: vector=%s path=%s grep=%s merged=%s stage2=%s top_hits=%s headers=%s",
+        len(vector_guidelines),
+        len(path_files),
+        len(grep_matches),
+        len(guidelines),
+        len(code_contents),
+        _summarize_guidelines(guidelines),
+        _summarize_code_contents(code_contents),
+    )
 
     return guidelines, code_contents, chunk_weights
 
@@ -247,6 +300,15 @@ async def _run_supplemental_retrieval(
             continue
         seen.add(query)
         normalized_queries.append(query)
+
+    logger.debug(
+        "[SupplementalRetrieval] start: repo=%s missing=%s suggested=%s existing_guidelines=%s existing_contents=%s",
+        repo_id,
+        missing_aspects,
+        normalized_queries,
+        len(existing_guidelines),
+        len(existing_contents),
+    )
 
     if normalized_queries:
         async def _noop() -> List:
@@ -297,10 +359,20 @@ async def _run_supplemental_retrieval(
                 ]
                 updated_contents = updated_contents + new_contents
                 updated_weights = updated_weights + new_weights
+                logger.debug(
+                    "[SupplementalRetrieval] appended chunks: new_chunk_ids=%s headers=%s",
+                    aligned_chunk_ids,
+                    _summarize_code_contents(new_contents),
+                )
 
     call_chain_aspects = {"call_chain", "implementation"}
     if call_chain_aspects & set(missing_aspects):
         direction = _infer_expansion_direction(missing_aspects, query=fused_query)
+        logger.debug(
+            "[SupplementalRetrieval] dependency expansion requested: direction=%s missing=%s",
+            direction,
+            missing_aspects,
+        )
         try:
             expanded = await asyncio.wait_for(
                 expand_via_dependency_graph(
@@ -325,12 +397,22 @@ async def _run_supplemental_retrieval(
             ]
             updated_contents = updated_contents + expanded_contents
             updated_weights = updated_weights + expanded_weights
+            logger.debug(
+                "[SupplementalRetrieval] dependency expansion hits=%s headers=%s",
+                _summarize_guidelines(expanded),
+                _summarize_code_contents(expanded_contents),
+            )
             logger.info(
                 "[ChatService] 依赖图扩展: direction=%s, new_chunks=%s",
                 direction,
                 len(expanded),
             )
 
+    logger.debug(
+        "[SupplementalRetrieval] done: guidelines=%s contents=%s",
+        len(updated_guidelines),
+        len(updated_contents),
+    )
     return updated_guidelines, updated_contents, updated_weights
 
 
@@ -378,6 +460,15 @@ async def _apply_evidence_check(
     """Check evidence sufficiency and optionally run one supplemental retrieval round."""
 
     evidence_result = check_evidence_sufficiency(query, code_contents, guidelines)
+    logger.debug(
+        "%s evidence decision: sufficient=%s missing=%s suggested=%s guideline_count=%s content_count=%s",
+        log_prefix,
+        evidence_result.is_sufficient,
+        evidence_result.missing_aspects,
+        evidence_result.suggested_queries[:5],
+        len(guidelines),
+        len(code_contents),
+    )
     if evidence_result.is_sufficient:
         return guidelines, code_contents, chunk_weights
 
@@ -389,7 +480,7 @@ async def _apply_evidence_check(
     )
 
     try:
-        return await asyncio.wait_for(
+        updated_guidelines, updated_contents, updated_weights = await asyncio.wait_for(
             _run_supplemental_retrieval(
                 evidence_result.missing_aspects,
                 evidence_result.suggested_queries,
@@ -403,6 +494,14 @@ async def _apply_evidence_check(
             ),
             timeout=timeout_seconds,
         )
+        logger.debug(
+            "%s evidence supplement result: guidelines=%s contents=%s headers=%s",
+            log_prefix,
+            len(updated_guidelines),
+            len(updated_contents),
+            _summarize_code_contents(updated_contents),
+        )
+        return updated_guidelines, updated_contents, updated_weights
     except asyncio.TimeoutError:
         logger.warning(
             "%s supplemental retrieval timed out (%.1fs), skip",
@@ -453,6 +552,14 @@ async def handle_chat(
     """
     model = llm_model or settings.DEFAULT_LLM_MODEL
     adapter = create_adapter(llm_provider)
+    logger.debug(
+        "[ChatService] handle_chat start: repo=%s session_id=%s provider=%s model=%s query=%r",
+        repo_id,
+        session_id,
+        llm_provider or settings.DEFAULT_LLM_PROVIDER,
+        model,
+        _truncate_for_log(query, 160),
+    )
 
     # 1. 会话管理
     if not session_id:
@@ -462,13 +569,30 @@ async def handle_chat(
         session_id = await create_session(repo_id)
 
     history = await get_history(session_id)
+    logger.debug(
+        "[ChatService] session ready: session_id=%s history_messages=%s",
+        session_id,
+        len(history),
+    )
 
     # 2. 查询融合
     fused_query = await fuse_query(query, history, llm_provider, llm_model)
+    logger.debug(
+        "[ChatService] fused query: original=%r fused=%r",
+        _truncate_for_log(query, 120),
+        _truncate_for_log(fused_query, 160),
+    )
 
     repo_name = await _get_repo_name(db, repo_id)
     codebase_index_text, index_data = await _get_codebase_index(db, repo_id)
     repo_dir = await _get_repo_dir(db, repo_id)
+    logger.debug(
+        "[ChatService] repo context: repo_name=%s has_index=%s index_files=%s repo_dir=%s",
+        repo_name,
+        bool(codebase_index_text),
+        len(index_data or {}),
+        repo_dir,
+    )
 
     # 3. 三路并行检索
     guidelines, code_contents, chunk_weights = await _three_way_retrieval(
@@ -497,6 +621,10 @@ async def handle_chat(
     # 检索规划：对宽泛查询，使用 LLM 识别目标文件并定点读取
     if codebase_index_text and is_broad_query(fused_query):
         planned_targets = await plan_retrieval(fused_query, codebase_index_text, llm_provider, llm_model)
+        logger.debug(
+            "[ChatService] planner targets: %s",
+            [{"file": t.file_path, "symbol": t.symbol_name} for t in planned_targets[:3]],
+        )
         for target in planned_targets[:3]:  # 最多 3 个文件，控制 token
             try:
                 content = await read_targeted_context(repo_id, target)
@@ -522,11 +650,25 @@ async def handle_chat(
     )
 
     context_budget = _compute_context_budget(model, system_prompt, query)
+    pre_trim_count = len(code_contents)
     code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
+    logger.debug(
+        "[ChatService] context budget: budget=%s pre_trim=%s post_trim=%s headers=%s",
+        context_budget,
+        pre_trim_count,
+        len(code_contents),
+        _summarize_code_contents(code_contents),
+    )
 
     rag_context = "\n\n---\n\n".join(code_contents)
     trimmed_history, trimmed_context = apply_token_budget(
         history, model, system_prompt, rag_context, query
+    )
+    logger.debug(
+        "[ChatService] prompt assembly: trimmed_history=%s rag_context_chars=%s trimmed_context_chars=%s",
+        len(trimmed_history),
+        len(rag_context),
+        len(trimmed_context),
     )
 
     # 6. 组装最终 Prompt
@@ -551,6 +693,11 @@ async def handle_chat(
             messages=messages, model=model, temperature=0.3
         )
         answer = response.content
+        logger.debug(
+            "[ChatService] llm response: answer_chars=%s usage=%s",
+            len(answer),
+            response.usage,
+        )
     except Exception as e:
         if "context_length" in str(e).lower() or "context length" in str(e).lower():
             logger.warning(f"[ChatService] Token 溢出，降级：移除 RAG 上下文重试")
@@ -582,6 +729,13 @@ async def handle_chat(
         tokens_used = response.usage.get("total_tokens", 0)
 
     await append_turn(session_id, query, answer, chunk_refs, tokens_used)
+    logger.debug(
+        "[ChatService] handle_chat done: session_id=%s refs=%s tokens_used=%s ref_preview=%s",
+        session_id,
+        len(chunk_refs),
+        tokens_used,
+        chunk_refs[:5],
+    )
 
     return {
         "session_id": session_id,
@@ -625,10 +779,22 @@ async def handle_chat_stream(
 
     # 2. 查询融合
     fused_query = await fuse_query(query, history, llm_provider, llm_model)
+    logger.debug(
+        "[ChatService] stream fused query: original=%r fused=%r",
+        _truncate_for_log(query, 120),
+        _truncate_for_log(fused_query, 160),
+    )
 
     repo_name = await _get_repo_name(db, repo_id)
     codebase_index_text, index_data = await _get_codebase_index(db, repo_id)
     repo_dir = await _get_repo_dir(db, repo_id)
+    logger.debug(
+        "[ChatService] stream repo context: repo_name=%s has_index=%s index_files=%s repo_dir=%s",
+        repo_name,
+        bool(codebase_index_text),
+        len(index_data or {}),
+        repo_dir,
+    )
 
     # 3. 三路并行检索
     guidelines, code_contents, chunk_weights = await _three_way_retrieval(
@@ -682,12 +848,26 @@ async def handle_chat_stream(
     )
 
     context_budget = _compute_context_budget(model, system_prompt, query)
+    pre_trim_count = len(code_contents)
     code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
+    logger.debug(
+        "[ChatService] stream context budget: budget=%s pre_trim=%s post_trim=%s headers=%s",
+        context_budget,
+        pre_trim_count,
+        len(code_contents),
+        _summarize_code_contents(code_contents),
+    )
 
     rag_context = "\n\n---\n\n".join(code_contents)
 
     trimmed_history, trimmed_context = apply_token_budget(
         history, model, system_prompt, rag_context, query
+    )
+    logger.debug(
+        "[ChatService] stream prompt assembly: trimmed_history=%s rag_context_chars=%s trimmed_context_chars=%s",
+        len(trimmed_history),
+        len(rag_context),
+        len(trimmed_context),
     )
 
     # 5. 组装 Prompt
@@ -746,6 +926,13 @@ async def handle_chat_stream(
 
     # 8. 持久化会话
     await append_turn(session_id, query, full_answer, chunk_refs, 0)
+    logger.debug(
+        "[ChatService] handle_chat_stream done: session_id=%s answer_chars=%s refs=%s ref_preview=%s",
+        session_id,
+        len(full_answer),
+        len(chunk_refs),
+        chunk_refs[:5],
+    )
 
     yield {"type": "done"}
 
@@ -802,9 +989,21 @@ async def handle_deep_research_stream(
         for m in messages[:-1]
     ]
     fused_query = await fuse_query(query, history_for_fusion, llm_provider, llm_model)
+    logger.debug(
+        "[DeepResearch] fused query: original=%r fused=%r history_messages=%s",
+        _truncate_for_log(query, 120),
+        _truncate_for_log(fused_query, 160),
+        len(history_for_fusion),
+    )
 
     codebase_index_text, index_data = await _get_codebase_index(db, repo_id)
     repo_dir = await _get_repo_dir(db, repo_id)
+    logger.debug(
+        "[DeepResearch] repo context: has_index=%s index_files=%s repo_dir=%s",
+        bool(codebase_index_text),
+        len(index_data or {}),
+        repo_dir,
+    )
 
     # 5. 三路检索
     guidelines, code_contents, chunk_weights = await _three_way_retrieval(
@@ -869,7 +1068,16 @@ async def handle_deep_research_stream(
         )
 
     context_budget = _compute_context_budget(model, system_prompt, user_instruction)
+    pre_trim_count = len(code_contents)
     code_contents = trim_chunks_to_budget(code_contents, context_budget, chunk_weights)
+    logger.debug(
+        "[DeepResearch] context budget: iteration=%s budget=%s pre_trim=%s post_trim=%s headers=%s",
+        iteration,
+        context_budget,
+        pre_trim_count,
+        len(code_contents),
+        _summarize_code_contents(code_contents),
+    )
 
     rag_context = "\n\n---\n\n".join(code_contents)
 
@@ -877,6 +1085,13 @@ async def handle_deep_research_stream(
     history_msgs = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")]
     trimmed_history, trimmed_context = apply_token_budget(
         history_msgs, model, system_prompt, rag_context, user_instruction
+    )
+    logger.debug(
+        "[DeepResearch] prompt assembly: iteration=%s trimmed_history=%s rag_context_chars=%s trimmed_context_chars=%s",
+        iteration,
+        len(trimmed_history),
+        len(rag_context),
+        len(trimmed_context),
     )
 
     messages_to_send = [LLMMessage(role="system", content=system_prompt)]
@@ -942,4 +1157,13 @@ async def handle_deep_research_stream(
     if not is_final:
         yield {"type": "deep_research_continue", "iteration": iteration, "next_iteration": iteration + 1}
 
+    logger.debug(
+        "[DeepResearch] iteration done: session_id=%s iteration=%s is_final=%s answer_chars=%s refs=%s ref_preview=%s",
+        session_id,
+        iteration,
+        is_final,
+        len(full_answer),
+        len(chunk_refs),
+        chunk_refs[:5],
+    )
     yield {"type": "done"}

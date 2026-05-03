@@ -1,34 +1,51 @@
 """
-retrieval_planner.py — 检索规划智能体
+retrieval_planner.py - planner for broad codebase queries.
 
-对宽泛查询（"所有 prompt"、"列举所有文件"、"翻译全部"等）使用轻量 LLM
-基于代码库索引识别目标文件，实现精准的全局检索。
+For broad queries such as "list all prompts" or "which files are related",
+use a lightweight LLM call plus the codebase index to identify targeted files
+and symbols for follow-up reads.
 """
+
 from dataclasses import dataclass
 import json
 import logging
 import re
 from typing import List, Optional
 
-from app.services.llm.factory import create_adapter
 from app.schemas.llm import LLMMessage
+from app.services.llm.factory import create_adapter
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PlannedTarget:
-    """检索规划目标：文件路径 + 可选的 symbol 名称"""
+    """Planner output target: file path plus optional symbol."""
 
     file_path: str
     symbol_name: Optional[str] = None
 
-# 触发规划的宽泛查询关键词（中英文）
+
 _BROAD_PATTERNS = [
-    r'所有', r'全部', r'列举', r'列出', r'找出所有', r'翻译.*所有', r'所有.*翻译',
-    r'都有哪些', r'有哪些', r'全都', r'一共有',
-    r'\ball\b', r'\bevery\b', r'\beach\b', r'\blist all\b', r'\btranslate all\b',
-    r'\bfind all\b', r'\bshow all\b', r'\benumerate\b',
+    r"所有",
+    r"全部",
+    r"列举",
+    r"列出",
+    r"找出所有",
+    r"翻译.*所有",
+    r"所有.*翻译",
+    r"都有哪",
+    r"有哪些",
+    r"全都",
+    r"一共",
+    r"\ball\b",
+    r"\bevery\b",
+    r"\beach\b",
+    r"\blist all\b",
+    r"\btranslate all\b",
+    r"\bfind all\b",
+    r"\bshow all\b",
+    r"\benumerate\b",
 ]
 
 PLANNER_PROMPT = """\
@@ -53,10 +70,17 @@ Response (JSON array only, no explanation):"""
 
 
 def is_broad_query(query: str) -> bool:
-    """判断是否为需要全局规划的宽泛查询"""
+    """Return whether the query should trigger planner-based retrieval."""
     for pattern in _BROAD_PATTERNS:
         if re.search(pattern, query, re.IGNORECASE):
+            logger.debug(
+                "[RetrievalPlanner] broad query detected: pattern=%r, query=%r",
+                pattern,
+                query[:120],
+            )
             return True
+
+    logger.debug("[RetrievalPlanner] broad query not detected: query=%r", query[:120])
     return False
 
 
@@ -67,8 +91,8 @@ async def plan_retrieval(
     llm_model: Optional[str] = None,
 ) -> List[PlannedTarget]:
     """
-    使用 LLM 规划检索目标文件。
-    返回文件路径 + symbol 列表。失败时返回空列表，不影响主流程。
+    Use an LLM to plan targeted file reads.
+    Returns an empty list on failure so the main pipeline can continue.
     """
     try:
         adapter = create_adapter(llm_provider)
@@ -77,6 +101,12 @@ async def plan_retrieval(
         prompt = PLANNER_PROMPT.format(
             codebase_index=codebase_index_text[:4000],
             question=query,
+        )
+        logger.debug(
+            "[RetrievalPlanner] start: model=%s, query=%r, index_chars=%s",
+            model,
+            query[:120],
+            len(codebase_index_text),
         )
 
         response = await adapter.generate_with_rate_limit(
@@ -87,23 +117,42 @@ async def plan_retrieval(
         )
 
         content = response.content.strip()
-        # 提取 JSON 数组（容错：content 可能包含多余文字）
-        match = re.search(r'\[.*?\]', content, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group())
-            if isinstance(parsed, list):
-                targets: List[PlannedTarget] = []
-                for item in parsed[:5]:
-                    if isinstance(item, str):
-                        targets.append(PlannedTarget(file_path=item))
-                    elif isinstance(item, dict) and isinstance(item.get("file"), str):
-                        targets.append(
-                            PlannedTarget(
-                                file_path=item["file"],
-                                symbol_name=item.get("symbol"),
-                            )
-                        )
-                return targets
-    except Exception as e:
-        logger.warning(f"[RetrievalPlanner] 规划调用失败，跳过: {e}")
-    return []
+        match = re.search(r"\[.*?\]", content, re.DOTALL)
+        if not match:
+            logger.debug(
+                "[RetrievalPlanner] no JSON array parsed from response: %r",
+                content[:300],
+            )
+            return []
+
+        parsed = json.loads(match.group())
+        if not isinstance(parsed, list):
+            logger.debug(
+                "[RetrievalPlanner] parsed payload is not a list: %r",
+                type(parsed).__name__,
+            )
+            return []
+
+        targets: List[PlannedTarget] = []
+        for item in parsed[:5]:
+            if isinstance(item, str):
+                targets.append(PlannedTarget(file_path=item))
+            elif isinstance(item, dict) and isinstance(item.get("file"), str):
+                targets.append(
+                    PlannedTarget(
+                        file_path=item["file"],
+                        symbol_name=item.get("symbol"),
+                    )
+                )
+
+        logger.debug(
+            "[RetrievalPlanner] planned targets: %s",
+            [
+                {"file": target.file_path, "symbol": target.symbol_name}
+                for target in targets
+            ],
+        )
+        return targets
+    except Exception as exc:
+        logger.warning(f"[RetrievalPlanner] 规划调用失败，跳过: {exc}")
+        return []

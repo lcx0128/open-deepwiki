@@ -104,6 +104,7 @@ async def search_file_paths(
 
     query_tokens = _tokenize_query(query)
     if not query_tokens:
+        logger.debug("[PathSearch] no query tokens extracted: repo=%s query=%r", repo_id, query[:120])
         return []
 
     scored_paths = []
@@ -121,7 +122,15 @@ async def search_file_paths(
         scored_paths.append((file_path, score))
 
     scored_paths.sort(key=lambda item: (-item[1], item[0]))
-    return [file_path for file_path, _ in scored_paths[:10]]
+    top_paths = [file_path for file_path, _ in scored_paths[:10]]
+    logger.debug(
+        "[PathSearch] repo=%s query_tokens=%s matched_paths=%s top_paths=%s",
+        repo_id,
+        query_tokens[:8],
+        len(scored_paths),
+        top_paths[:5],
+    )
+    return top_paths
 
 
 def _is_binary_file(file_path: str) -> bool:
