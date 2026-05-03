@@ -122,3 +122,4 @@ doc/dev-context/
 .claude/
 AGENTS.md
 output/
+.codex-artifacts
